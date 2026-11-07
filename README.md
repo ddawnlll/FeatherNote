@@ -1,172 +1,259 @@
 # FeatherNote
 
-A single-owner, self-hosted note service: one Zig process, one SQLite file, server-rendered HTML, and a 3 KiB stylesheet. No JavaScript is required to create, read, edit, search, pin, delete, or restore notes. It is designed to listen on loopback behind a TLS reverse proxy on an inexpensive Linux machine.
+**A quiet, single-owner notebook: one small Zig binary, one SQLite file, no JavaScript.**
 
-**Status:** P0 implementation complete and locally verified. Performance figures below are measured on the build machine identified in `reports/benchmarks.md`; they are not universal claims.
+[![Zig 0.17.1](https://img.shields.io/badge/zig-0.17.1-f7a41d)](https://ziglang.org/download/)
+![SQLite 3.54.1](https://img.shields.io/badge/sqlite-3.54.1-003b57)
+![No JavaScript required](https://img.shields.io/badge/javascript-0%20required-1d5c46)
 
-## Current public installation
+![The FeatherNote notes list](docs/screenshots/notes-list.png)
 
-This host is serving FeatherNote through nginx:
+FeatherNote is a self-hosted notes app for exactly one person. A small Zig
+process serves plain HTML, every note lives in a single SQLite database, and
+everything works with JavaScript turned off. You log in with one password, then
+write, search, pin, delete, and restore. There is no registration, no sharing,
+no sync service, and no tracking.
 
-- nginx listens on `0.0.0.0:80` and `0.0.0.0:443`; the Zig app remains on `127.0.0.1:8080`.
-- Both run as **systemd user services** with linger enabled, so they start at boot.
-- Public IP: `https://212.108.82.243/` with a self-signed certificate until DuckDNS/Let's Encrypt is configured.
-- Initial owner password: `/home/quant/feathernote-data/INITIAL_PASSWORD.txt` (mode 600). Change it after first login.
-- DuckDNS setup: `/home/quant/.local/bin/feathernote-configure-duckdns SUBDOMAIN TOKEN`.
-- Full paths, update procedure, timers and troubleshooting: **`docs/DEPLOYMENT.md`**.
-- Agent/operator instructions: **`AGENTS.md`**.
+It is meant for the case where you want your notes on a cheap VPS, you want
+backups to be one file, and you want to understand the whole thing in an
+afternoon.
 
-## What works
+| | |
+|---|---|
+| Runtime | Zig 0.17.1, one process |
+| Storage | SQLite 3.54.1, one file, WAL with `synchronous=FULL` |
+| UI | Server-rendered HTML and a 3 KiB stylesheet |
+| JavaScript | none required, none served |
+| Auth | one owner, Argon2id, server-side sessions |
+| Search | SQLite FTS5, quoted phrase terms |
+| Public port | never. FeatherNote binds loopback and sits behind a TLS proxy |
 
-- Owner bootstrap from a local admin command; no public registration and no default password.
-- Login/logout with Argon2id, server-side session digests, `HttpOnly`/`SameSite=Strict` cookies, session expiry, and login rate limiting.
-- Create, list, open, edit, save, pin/unpin, soft-delete, and restore plaintext UTF-8 notes.
-- Title/body search (FTS5, safely quoted terms) with URL-addressable queries, server-side pagination (50 notes per page), and deterministic ordering: pinned first, then `updated_at DESC, id DESC`.
-- Optimistic concurrency: an update carries the version it started from. A stale save returns **409** and shows both the latest stored version and the complete submitted draft, with an explicit "save my draft over the latest" form. Nothing is overwritten silently.
-- Post/Redirect/Get after every successful mutation.
-- HTML escaping everywhere, including `</textarea>` injection; CSP denies scripts and remote assets.
-- CSRF synchronizer tokens on every authenticated mutation, including logout.
-- Responsive single-column mobile layout and a two-column desktop editor/list layout.
-- Consistent online SQLite backup, integrity check, and documented restore.
-- No browser JavaScript, no CDN, no external fonts, no analytics.
+## A quick tour
 
-## Requirements
+### All your notes
 
-- Linux x86_64 (other Zig targets are possible but untested).
-- Zig **0.17.1** to build.
-- SQLite **3.54.1** is vendored as the official amalgamation; no system SQLite is required.
-- For public access: a maintained TLS terminator such as Nginx. FeatherNote never implements TLS.
+Pinned notes stay on top, then everything else by last edit. Fifty notes per
+page, with search that survives a bookmark or a shared URL.
 
-## Build
+### Editing
+
+The desktop editor keeps recent notes in a sidebar. On a phone the sidebar
+disappears and the same HTML becomes a single column.
+
+![Editing a note](docs/screenshots/note-editor.png)
+
+### Search
+
+Search runs over titles and bodies with FTS5. Input is split into words, each
+word is quoted, and the words are joined with `AND`, so it stays a search box
+and never becomes a query language. On the benchmark machine, a 10,000 note
+search had a p95 of 4.2 ms.
+
+![Search results for book](docs/screenshots/search.png)
+
+### When two tabs disagree
+
+Every save carries the version it started from. If the note changed in another
+tab, FeatherNote returns **409** and shows your complete draft beside the
+latest saved version. Nothing is overwritten silently. Saving your draft over
+the latest version is a separate, explicit click.
+
+![The edit conflict page with both versions](docs/screenshots/conflict.png)
+
+### Trash, login, and a blank note
+
+| Deleted notes are recoverable | One password, no registration |
+|---|---|
+| <img src="docs/screenshots/trash.png" alt="Trash with two deleted notes"> | <img src="docs/screenshots/login.png" alt="Login page"> |
+
+| Starting a new note |
+|---|
+| <img src="docs/screenshots/new-note.png" alt="New note form"> |
+
+### On a phone
+
+No app, no separate mobile site, no JavaScript. The same server-rendered pages
+reflow to one column.
+
+<img src="docs/screenshots/mobile-notes.png" alt="FeatherNote on a phone" width="360">
+
+## Run it locally
+
+You need Zig **0.17.1** and nothing else. SQLite is vendored, so there is no
+system SQLite dependency.
 
 ```sh
+git clone https://github.com/ddawnlll/FeatherNote.git
+cd FeatherNote
+
 zig build --release=safe
-./zig-out/bin/feathernote --help
-```
 
-Zig 0.17 uses `--release=safe` rather than `-Doptimize=ReleaseSafe`. A debug build is `zig build`.
-
-## First run
-
-```sh
 mkdir -p data
-printf '%s\n' 'a long owner password' | ./zig-out/bin/feathernote admin set-password --db data/feathernote.db
-./zig-out/bin/feathernote serve --db data/feathernote.db --listen 127.0.0.1:8080 --insecure-cookies
+printf '%s\n' 'a long owner password' | \
+  ./zig-out/bin/feathernote admin set-password --db data/feathernote.db
+
+./zig-out/bin/feathernote serve \
+  --db data/feathernote.db \
+  --listen 127.0.0.1:8080 \
+  --insecure-cookies
 ```
 
-Open <http://127.0.0.1:8080/>. `--insecure-cookies` is only for plain-HTTP local testing; the production default uses a `__Host-` cookie and requires HTTPS.
+Open <http://127.0.0.1:8080/>.
 
-Configuration can also be supplied through environment variables:
+`--insecure-cookies` exists only for plain-HTTP local testing. The production
+default uses a `__Host-` cookie and requires HTTPS.
+
+FeatherNote has been built and run on macOS (aarch64) and Linux x86_64. Other
+Zig targets should work but are untested.
+
+Configuration can also come from the environment:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `FEATHERNOTE_DB` | `data/feathernote.db` | SQLite database path |
-| `FEATHERNOTE_LISTEN` | `127.0.0.1:8080` | `host:port`; non-loopback binds are refused unless `--allow-public-bind` |
-| `FEATHERNOTE_INSECURE_COOKIES` | `0` | `1` omits `Secure` and uses a non-`__Host-` cookie name (local tests only) |
-| `FEATHERNOTE_TRUST_PROXY` | `0` | Trust `X-Real-IP` for login rate limiting; enable only behind the local proxy |
-| `FEATHERNOTE_SESSION_DAYS` | `30` | Absolute session lifetime, 1-365 |
-| `FEATHERNOTE_ALLOW_PUBLIC_BIND` | `0` | Allow a non-loopback listen address; intended only with an external firewall |
+| `FEATHERNOTE_DB` | `data/feathernote.db` | database path |
+| `FEATHERNOTE_LISTEN` | `127.0.0.1:8080` | `host:port` |
+| `FEATHERNOTE_INSECURE_COOKIES` | `0` | local HTTP only |
+| `FEATHERNOTE_TRUST_PROXY` | `0` | trust `X-Real-IP` from the local proxy |
+| `FEATHERNOTE_SESSION_DAYS` | `30` | absolute session lifetime, 1 to 365 |
+| `FEATHERNOTE_ALLOW_PUBLIC_BIND` | `0` | allow a non-loopback bind |
 
-Flags override environment values: `--db`, `--listen`, `--insecure-cookies`, `--trust-proxy`, `--allow-public-bind`.
+Flags override environment values. The full list is available with
+`feathernote --help`.
 
-## HTTPS deployment
+## How it is put together
 
-1. Build and install the binary, for example to `/usr/local/bin/feathernote`.
-2. Create a service account and data directory:
-   ```sh
-   sudo useradd --system --home /var/lib/feathernote --shell /usr/sbin/nologin feathernote
-   sudo install -d -o feathernote -g feathernote -m 700 /var/lib/feathernote
-   sudo -u feathernote /usr/local/bin/feathernote admin set-password --db /var/lib/feathernote/feathernote.db
-   ```
-3. Install `deploy/feathernote.service` as `/etc/systemd/system/feathernote.service`, then:
-   ```sh
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now feathernote
-   ```
-4. Install an Nginx server block based on `deploy/nginx.conf`, replacing the hostname and certificate paths. Keep `proxy_pass http://127.0.0.1:8080` and `--trust-proxy` in the unit.
-5. Confirm:
-   ```sh
-   curl -fsS http://127.0.0.1:8080/healthz
-   curl -fsSI https://notes.example.com/login
-   ```
-   The public response should include `Strict-Transport-Security`, a restrictive CSP, and `X-Content-Type-Options: nosniff`.
+- **One process, one database connection.** A mutex serializes access, which
+  keeps memory predictable for a single owner. At most 64 connections are
+  admitted at once.
+- **Durability first.** WAL mode with `synchronous=FULL`. A successful save is
+  committed and synced before the response is sent.
+- **Optimistic concurrency.** Each note has a version. A stale save gets a 409
+  and both versions, never a silent overwrite.
+- **CSRF on every authenticated mutation**, including logout. Login is rate
+  limited and runs a full Argon2id verification.
+- **Escaped output everywhere**, including `</textarea>`. The CSP is
+  `default-src 'none'` with only local styles allowed.
+- **Embedded assets.** The stylesheet and migrations are compiled into the
+  binary, so the executable has no runtime path assumptions.
+- **FTS5 search** through an external-content index with triggers, so note
+  bodies are stored once.
 
-The Zig process binds loopback only. The reverse proxy owns certificates, renewal, TLS policy, and the public request-size ceiling. The app enforces its own 320 KiB request-body limit as well.
+The whole schema is two migrations in [`migrations/`](migrations/). The design
+tradeoffs are recorded in [`docs/DECISIONS.md`](docs/DECISIONS.md).
+
+## Deploying behind TLS
+
+FeatherNote never implements TLS. It binds loopback and expects a reverse proxy
+to own certificates, HSTS, request size ceilings, and the public listener.
+
+1. Build and install the binary somewhere like `/usr/local/bin/feathernote`.
+2. Create a service account and data directory, then set the owner password
+   with `feathernote admin set-password`.
+3. Install [`deploy/feathernote.service`](deploy/feathernote.service) and
+   enable it.
+4. Put nginx or Caddy in front, using [`deploy/nginx.conf`](deploy/nginx.conf)
+   as a starting point. Keep `proxy_pass http://127.0.0.1:8080` and start the
+   app with `--trust-proxy`.
+
+The step by step version, including systemd user units, DuckDNS, and Let's
+Encrypt renewal, is in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ## Backup and restore
 
-Use the online backup API, never a plain copy of a live WAL database:
+Use the online backup command. Do not copy a live WAL database with `cp`.
 
 ```sh
 feathernote admin backup --db /var/lib/feathernote/feathernote.db \
-  --out /var/backups/feathernote/daily/feathernote-$(date -u +%Y%m%dT%H%M%SZ).db
+  --out /var/backups/feathernote/daily/pre-update.db
 ```
 
-`scripts/backup.sh` adds daily/weekly retention (7 daily, 4 weekly). The backup command runs `PRAGMA integrity_check` on the destination before reporting success.
+The command runs `PRAGMA integrity_check` on the destination before reporting
+success. [`scripts/backup.sh`](scripts/backup.sh) adds 7 daily and 4 weekly
+retention. [`scripts/restore.sh`](scripts/restore.sh) refuses to overwrite an
+existing database, verifies the backup, and swaps it into place with the
+service stopped.
 
-Restore deliberately, with the service stopped:
+Backups that leave the host should be encrypted with a key you manage
+separately. FeatherNote does not claim end-to-end encryption, because the
+server reads plaintext.
 
-```sh
-sudo systemctl stop feathernote
-sudo scripts/restore.sh /var/backups/feathernote/daily/feathernote-YYYYmmddTHHMMSSZ.db \
-  /var/lib/feathernote/feathernote.db
-sudo systemctl start feathernote
-```
-
-`scripts/restore.sh` refuses to overwrite an existing database, verifies the backup, copies to a temporary name, syncs, renames, removes stale `-wal`/`-shm` sidecars, and verifies the result. Backups that leave the host must be encrypted with a separately managed key; FeatherNote does not claim end-to-end encryption, because the server reads plaintext.
-
-## Tests
+## Tests and measurements
 
 ```sh
-zig build test          # Zig unit tests: CRUD, search, conflicts, sessions
-python3 tests/integration.py   # real server, adversarial HTTP, restart, backup/restore
-```
-
-The integration suite drives the compiled server over TCP with no JavaScript and checks login, unauthorized access, all note operations, 409 draft preservation, CSRF, XSS/`</textarea>` escaping, SQL injection in search and login, invalid UTF-8, oversized bodies, disallowed methods, logout revocation, restart persistence, survival of an acknowledged write after `SIGKILL`, an online backup taken while 40 concurrent saves are in flight, restore into a fresh directory, security headers, and absence of secrets in logs. It executes 67 checks.
-
-## Benchmarks
-
-```sh
+zig build test                 # unit tests: CRUD, search, conflicts, sessions
+python3 tests/integration.py   # 67 real HTTP checks, no JavaScript
 python3 scripts/bench.py --requests 200 --counts 100,10000
 ```
 
-Measured results, commands, machine details, and PASS/FAIL/UNVERIFIED status are in `reports/benchmarks.md` and raw JSON in `reports/benchmarks-raw.json`. Summary on this machine (ReleaseSafe, loopback, 1 KiB notes): idle RSS 6.0-6.6 MiB, idle PSS 4.6-5.1 MiB, peak RSS 23.4 MiB during Argon2id login, warm note GET p95 1.1-3.2 ms, save p95 9.1-10.6 ms, 10k-note FTS search p95 4.2 ms. See the report for exact figures and unverified items.
+The integration suite drives the compiled server over TCP and covers login,
+unauthorized access, every note operation, 409 draft preservation, CSRF,
+XSS and `</textarea>` escaping, SQL injection in search and login, invalid
+UTF-8, oversized bodies, disallowed methods, logout revocation, restart
+persistence, survival of an acknowledged write after `SIGKILL`, an online
+backup taken while 40 concurrent saves are in flight, restore into a fresh
+directory, security headers, and the absence of secrets in logs.
 
-## Data and behaviour notes
+Benchmarks are measured, not estimated. On the recorded Debian 13 machine
+(ReleaseSafe, loopback, 1 KiB notes):
 
-- Timestamps are UTC Unix seconds. Titles are limited to 200 Unicode scalar values / 1 KiB; note bodies to 256 KiB; full form posts to 320 KiB; search queries to 100 bytes.
-- Sessions have an absolute 30-day lifetime by default. `last_used_at` is refreshed at most hourly. Logout revokes the server-side session.
-- Soft-deleted notes remain in Trash. There is no purge UI in P0; an operator can remove them with SQL after taking a backup.
-- One SQLite connection is serialized by a mutex. This keeps memory predictable for one owner; the schema and service API do not assume a connection pool.
-- At most 64 connections are admitted at once; excess loopback connections are closed immediately. The reverse proxy is still expected to enforce its own connection and body limits.
-- WAL mode with `synchronous=FULL`. Acknowledged writes are committed and synced before the response. WAL is checkpointed on normal shutdown; after a crash SQLite recovers automatically.
-- The service has no background worker, polling loop, websocket, or timer. Idle CPU measured at 0.0 s over a 5 s sample.
-- There is no graceful-shutdown signal handler. `SIGTERM` terminates the process; committed notes survive, and SQLite recovers the WAL on the next start.
+| Metric | Measured |
+|---|---|
+| Idle RSS | 6.0 to 6.6 MiB |
+| Peak RSS during Argon2id login | 23.4 MiB |
+| Warm note GET p95 | 1.1 to 3.2 ms |
+| Save POST p95 | 9.1 to 10.6 ms |
+| 10,000 note FTS search p95 | 4.2 ms |
 
-## Security limitations and non-claims
+Commands, percentiles, machine details, and the items that remain UNVERIFIED
+are in [`reports/benchmarks.md`](reports/benchmarks.md), with raw JSON in
+[`reports/benchmarks-raw.json`](reports/benchmarks-raw.json). These numbers are
+from one machine and are not a universal claim.
 
-- One owner only; there is no sharing, multi-tenancy, or public registration.
-- No password reset flow. Use `feathernote admin set-password` with local access; it revokes all sessions.
-- Login POST is not CSRF-protected because there is no cross-account confusion possible on a single-owner instance and the form has no session. Every authenticated mutation, including logout, uses a session-bound CSRF token. This is recorded in `docs/DECISIONS.md`.
-- Search uses an external-content FTS5 index. User input is split into whitespace terms, individually quoted with embedded quotes doubled, and joined with `AND`; it is never interpolated into `MATCH` as a query language. The 10k-note gate is measured in the benchmark report.
-- Plaintext on the server is accessible to the server process and to anyone who can read the database. Protect file permissions and backups accordingly.
-- No third-party error collection or analytics. Application logs contain route paths and errors, not note bodies, passwords, cookies, or query strings.
+## Reproducing the screenshots
+
+Every screenshot above was captured from a real running instance with
+Playwright, not drawn as a mockup. The demo notes and capture script are in the
+repository:
+
+- [`scripts/demo-notes.py`](scripts/demo-notes.py) inserts a small set of
+  realistic notes into a fresh database.
+- [`scripts/capture-screenshots.js`](scripts/capture-screenshots.js) logs in,
+  visits each page, triggers a real edit conflict, and writes the images into
+  `docs/screenshots/`.
+
+Point `FEATHERNOTE_URL` at a local demo server, install Playwright, and run the
+script. The demo password in the script is for throwaway local data only.
 
 ## Repository layout
 
 ```
-src/            Zig sources: server/routes, SQLite layer, auth, HTML views, HTTP helpers
-assets.zig      build-time embedding of CSS and SQL migration
-web/style.css   local stylesheet (3047 bytes)
+src/            server, routes, SQLite layer, auth, HTML views, HTTP helpers
+assets.zig      build-time embedding of CSS and migrations
+web/style.css   the entire stylesheet (3 KiB)
 migrations/     versioned SQL schema
 tests/          integration and adversarial HTTP suite
-scripts/        backup, restore, seed, benchmark
-deploy/         hardened systemd unit and Nginx example
+scripts/        backup, restore, seed, benchmark, demo data, screenshots
+deploy/         systemd units and nginx examples
+docs/           deployment guide, decision log, screenshots
 reports/        measured benchmark evidence
-docs/           decision log
-vendor/sqlite/  pinned SQLite 3.54.1 amalgamation + checksums
+vendor/sqlite/  pinned SQLite 3.54.1 amalgamation with checksums
 ```
+
+## Limits and honest non-goals
+
+- One owner. No sharing, no teams, no public registration.
+- No password reset flow. A local operator runs
+  `feathernote admin set-password`, which revokes all sessions.
+- Notes are plaintext on the server. Anyone who can read the database or its
+  backups can read the notes.
+- Search is word matching, not a query language.
+- No purge UI. Deleted notes stay in Trash until an operator removes them.
+- No background worker, polling loop, websocket, or sync protocol.
+- No graceful-shutdown handler. `SIGTERM` is safe because WAL plus
+  `synchronous=FULL` keeps acknowledged writes.
+- Revisions and diffs are future work. The 409 flow preserves drafts today.
 
 ## License
 
-No license file is included yet. Add one before distributing binaries.
+No license file is included yet. Add one before redistributing binaries or
+hosting this for anyone other than yourself.
