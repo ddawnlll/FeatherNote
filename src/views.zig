@@ -201,7 +201,8 @@ pub fn editor(w: *Writer, ctx: Ctx, args: EditorArgs) !void {
     const is_new = args.note == null;
     const title = if (is_new) "New note" else displayTitle(args.note.?.title);
     try documentStart(w, title, ctx, null);
-    try w.writeAll("<div class=\"layout\">\n");
+    // Only wrap in the two-column grid when there is a sidebar to sit beside.
+    if (!is_new) try w.writeAll("<div class=\"layout\">\n");
     if (!is_new) try sidebar(w, args.sidebar_rows, args.note.?.id);
     try w.writeAll("<article class=\"editor\">\n");
     if (is_new) {
@@ -258,7 +259,8 @@ pub fn editor(w: *Writer, ctx: Ctx, args: EditorArgs) !void {
         try w.print("{d}", .{args.note.?.id});
         try w.writeAll("/delete\">Delete…</a></div>\n");
     }
-    try w.writeAll("</article>\n</div>\n");
+    try w.writeAll("</article>\n");
+    if (!is_new) try w.writeAll("</div>\n");
     try documentEnd(w);
 }
 
