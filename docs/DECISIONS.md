@@ -58,6 +58,18 @@ The specification permits loopback or a Unix socket. TCP `127.0.0.1` is the test
 
 Admin commands print status and errors with `std.debug.print` (stderr). Tests accept combined stdout/stderr. This keeps diagnostics separate from any future machine-readable stdout mode.
 
-## D015 — Plaintext is the product
+## D015 — Themes are server-side owner state, not a cookie or script
+
+The selected theme is a validated id stored on the single owner row and emitted as `data-theme` on `<html>`. One embedded stylesheet carries all twelve palettes. Switching is a CSRF-protected form post. This keeps the choice consistent across devices, includes it in backups, and avoids a theme-flash cookie or any client script. The CSS grew from 3 KiB to about 22 KiB; it is still a single embedded, cacheable request with no per-navigation cost.
+
+## D016 — Markdown is a safe, bounded subset rendered on the server
+
+`src/markdown.zig` renders headings, emphasis, strikethrough, inline and fenced or indented code, lists, quotes, rules, links, and images. Source text is escaped before output, raw HTML never passes through, and links are limited to http(s), mailto, and same-origin absolute paths. Images are same-origin only, matching the CSP's `img-src 'self'`, so remote images cannot be used as tracking pixels. Innermost emphasis and link labels are depth-limited. The read view renders this HTML; the editor stays a plain textarea. Tables, footnotes, task lists, and embedded HTML are intentionally unsupported and degrade to text.
+
+## D017 — Attachments are SQLite BLOBs, uploaded without JavaScript
+
+Files up to 8 MiB are parsed from `multipart/form-data`, MIME-sniffed from their bytes rather than trusted headers, and stored in an `attachments` table with a SHA-256 ETag. Images are served inline; every other type, including SVG and HTML, is served as a download with `nosniff`. Uploads require CSRF and append a Markdown link to the note. Clipboard paste and drag-and-drop need JavaScript and are deliberately absent; the file picker is the supported path.
+
+## D018 — Plaintext is the product
 
 The server reads note plaintext to render and search it. No end-to-end encryption is claimed. Database and backup file permissions, plus host security, are the protection boundary; backups leaving the host require operator-managed encryption.

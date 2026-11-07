@@ -1,18 +1,19 @@
 # FeatherNote
 
-**A quiet, single-owner notebook: one small Zig binary, one SQLite file, no JavaScript.**
+**A quiet, single-owner notebook: Markdown, twelve themes, file attachments, and zero JavaScript.**
 
 [![Zig 0.17.1](https://img.shields.io/badge/zig-0.17.1-f7a41d)](https://ziglang.org/download/)
 ![SQLite 3.54.1](https://img.shields.io/badge/sqlite-3.54.1-003b57)
-![No JavaScript required](https://img.shields.io/badge/javascript-0%20required-1d5c46)
+![No JavaScript](https://img.shields.io/badge/javascript-0%20bytes-1d5c46)
+![Themes](https://img.shields.io/badge/themes-12-c07a3c)
 
 ![The FeatherNote notes list](docs/screenshots/notes-list.png)
 
 FeatherNote is a self-hosted notes app for exactly one person. A small Zig
 process serves plain HTML, every note lives in a single SQLite database, and
 everything works with JavaScript turned off. You log in with one password, then
-write, search, pin, delete, and restore. There is no registration, no sharing,
-no sync service, and no tracking.
+read, write Markdown, search, pin, attach files, delete, and restore. There is
+no registration, no sharing, no sync service, and no tracking.
 
 It is meant for the case where you want your notes on a cheap VPS, you want
 backups to be one file, and you want to understand the whole thing in an
@@ -22,25 +23,42 @@ afternoon.
 |---|---|
 | Runtime | Zig 0.17.1, one process |
 | Storage | SQLite 3.54.1, one file, WAL with `synchronous=FULL` |
-| UI | Server-rendered HTML and a 3 KiB stylesheet |
+| UI | Server-rendered HTML, embedded CSS, 12 themes |
 | JavaScript | none required, none served |
+| Writing | Markdown source, server-rendered read view |
+| Files | image, PDF, text, and archive attachments up to 8 MiB |
 | Auth | one owner, Argon2id, server-side sessions |
 | Search | SQLite FTS5, quoted phrase terms |
 | Public port | never. FeatherNote binds loopback and sits behind a TLS proxy |
 
 ## A quick tour
 
-### All your notes
+### Read first, then edit
 
-Pinned notes stay on top, then everything else by last edit. Fifty notes per
-page, with search that survives a bookmark or a shared URL.
+Opening a note shows the rendered Markdown, not a text box. The Read and Edit
+tabs are ordinary links, so the whole flow works without scripting. Recent
+notes stay in a sidebar on desktop.
 
-### Editing
+![Reading a note with rendered Markdown and a code block](docs/screenshots/note-read.png)
 
-The desktop editor keeps recent notes in a sidebar. On a phone the sidebar
-disappears and the same HTML becomes a single column.
+### Write in Markdown
 
-![Editing a note](docs/screenshots/note-editor.png)
+The editor is a plain textarea plus a cheatsheet. Headings, emphasis, lists,
+quotes, fenced and indented code, links, and images are rendered by a small
+server-side parser. Raw HTML is escaped, never executed.
+
+![Editing a Markdown note](docs/screenshots/note-editor.png)
+
+### Attach images and files
+
+The editor's file form uploads an image or document, stores it in the same
+SQLite file, and appends a Markdown link to the end of the note. Images render
+inline in the read view. Other types download as attachments.
+
+Pasting an image from the clipboard, or dragging a file onto the page, requires
+JavaScript. FeatherNote does not do that. Use the file picker instead.
+
+![A note with an uploaded image and attachment listing](docs/screenshots/note-with-image.png)
 
 ### Search
 
@@ -51,14 +69,15 @@ search had a p95 of 4.2 ms.
 
 ![Search results for book](docs/screenshots/search.png)
 
-### When two tabs disagree
+### Twelve themes, including dark mode
 
-Every save carries the version it started from. If the note changed in another
-tab, FeatherNote returns **409** and shows your complete draft beside the
-latest saved version. Nothing is overwritten silently. Saving your draft over
-the latest version is a separate, explicit click.
+Themes are stored in the owner row, so the choice follows you across devices
+and travels inside backups. Eight are dark, four are light. The picker is a
+form with radio cards, and the swatches preview each palette.
 
-![The edit conflict page with both versions](docs/screenshots/conflict.png)
+![The twelve theme cards](docs/screenshots/themes.png)
+
+![The notes list in the Midnight theme](docs/screenshots/notes-dark.png)
 
 ### Trash
 
@@ -76,8 +95,8 @@ the password, a local operator resets it and revokes every session.
 
 ### Starting a new note
 
-The composer is a title and a plain text box. No toolbar, no block editor, no
-autosave race.
+The composer is a title and a Markdown text box. Save once before attaching
+files. No toolbar, no block editor, no autosave race.
 
 ![New note form](docs/screenshots/new-note.png)
 
@@ -87,6 +106,15 @@ No app, no separate mobile site, no JavaScript. The same server-rendered pages
 reflow to one column.
 
 <img src="docs/screenshots/mobile-notes.png" alt="FeatherNote on a phone" width="360">
+
+### When two tabs disagree
+
+Every save carries the version it started from. If the note changed in another
+tab, FeatherNote returns **409** and shows your complete draft beside the
+latest saved version. Nothing is overwritten silently. Saving your draft over
+the latest version is a separate, explicit click.
+
+![The edit conflict page with both versions](docs/screenshots/conflict.png)
 
 ## Run it locally
 
@@ -140,16 +168,29 @@ Flags override environment values. The full list is available with
   committed and synced before the response is sent.
 - **Optimistic concurrency.** Each note has a version. A stale save gets a 409
   and both versions, never a silent overwrite.
-- **CSRF on every authenticated mutation**, including logout. Login is rate
-  limited and runs a full Argon2id verification.
+- **Safe Markdown.** A small renderer escapes all source text, never passes
+  raw HTML through, allows links to http(s), mailto, and same-origin paths, and
+  allows images only from same-origin paths. See
+  [`src/markdown.zig`](src/markdown.zig).
+- **Attachments in SQLite.** Uploads are parsed as multipart, size-capped at
+  8 MiB, MIME-sniffed from the bytes, and stored as BLOBs. Images are served
+  inline. Everything else, including SVG and HTML, is served as a download
+  with `nosniff`. See [`src/multipart.zig`](src/multipart.zig).
+- **Server-side themes.** The selected theme is a validated id in the owner
+  row. Every page emits it as `data-theme`, and one embedded stylesheet carries
+  all twelve palettes. Swapping themes costs one form post and one cached
+  stylesheet.
+- **CSRF on every authenticated mutation**, including logout, theme changes,
+  uploads, and file deletion. Login is rate limited and runs a full Argon2id
+  verification.
 - **Escaped output everywhere**, including `</textarea>`. The CSP is
-  `default-src 'none'` with only local styles allowed.
+  `default-src 'none'` with only local styles and same-origin images allowed.
 - **Embedded assets.** The stylesheet and migrations are compiled into the
   binary, so the executable has no runtime asset paths.
 - **FTS5 search** through an external-content index with triggers, so note
   bodies are stored once.
 
-The whole schema is two migrations in [`migrations/`](migrations/). The design
+The schema is three migrations in [`migrations/`](migrations/). The design
 tradeoffs are recorded in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
 ## Deploying behind TLS
@@ -166,6 +207,9 @@ to own certificates, HSTS, request size ceilings, and the public listener.
    as a starting point. Keep `proxy_pass http://127.0.0.1:8080` and start the
    app with `--trust-proxy`.
 
+If attachments matter, raise the proxy's request-body limit above 8 MiB while
+keeping it finite. The app enforces its own cap regardless.
+
 The step by step version, including systemd user units, DuckDNS, and Let's
 Encrypt renewal, is in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
@@ -179,10 +223,12 @@ feathernote admin backup --db /var/lib/feathernote/feathernote.db \
 ```
 
 The command runs `PRAGMA integrity_check` on the destination before reporting
-success. [`scripts/backup.sh`](scripts/backup.sh) adds 7 daily and 4 weekly
-retention. [`scripts/restore.sh`](scripts/restore.sh) refuses to overwrite an
-existing database, verifies the backup, and swaps it into place with the
-service stopped.
+success. Because attachments and the selected theme live in SQLite, a backup
+carries notes, files, and appearance together.
+[`scripts/backup.sh`](scripts/backup.sh) adds 7 daily and 4 weekly retention.
+[`scripts/restore.sh`](scripts/restore.sh) refuses to overwrite an existing
+database, verifies the backup, and swaps it into place with the service
+stopped.
 
 Backups that leave the host should be encrypted with a key you manage
 separately. FeatherNote does not claim end-to-end encryption, because the
@@ -191,18 +237,20 @@ server reads plaintext.
 ## Tests and measurements
 
 ```sh
-zig build test                 # unit tests: CRUD, search, conflicts, sessions
-python3 tests/integration.py   # 67 real HTTP checks, no JavaScript
+zig build test                 # unit tests: Markdown, multipart, CRUD, search
+python3 tests/integration.py   # 88 real HTTP checks, no JavaScript
 python3 scripts/bench.py --requests 200 --counts 100,10000
 ```
 
 The integration suite drives the compiled server over TCP and covers login,
-unauthorized access, every note operation, 409 draft preservation, CSRF,
-XSS and `</textarea>` escaping, SQL injection in search and login, invalid
-UTF-8, oversized bodies, disallowed methods, logout revocation, restart
-persistence, survival of an acknowledged write after `SIGKILL`, an online
-backup taken while 40 concurrent saves are in flight, restore into a fresh
-directory, security headers, and the absence of secrets in logs.
+unauthorized access, every note operation, Markdown rendering and escaping,
+theme selection and CSRF, image upload and inline delivery, SVG served as a
+download, attachment deletion, 409 draft preservation, CSRF, XSS and
+`</textarea>` escaping, SQL injection in search and login, invalid UTF-8,
+oversized bodies, disallowed methods, logout revocation, restart persistence,
+survival of an acknowledged write after `SIGKILL`, an online backup taken while
+40 concurrent saves are in flight, restore into a fresh directory, security
+headers, and the absence of secrets in logs.
 
 Benchmarks are measured, not estimated. On the recorded Debian 13 machine
 (ReleaseSafe, loopback, 1 KiB notes):
@@ -218,19 +266,21 @@ Benchmarks are measured, not estimated. On the recorded Debian 13 machine
 Commands, percentiles, machine details, and the items that remain UNVERIFIED
 are in [`reports/benchmarks.md`](reports/benchmarks.md), with raw JSON in
 [`reports/benchmarks-raw.json`](reports/benchmarks-raw.json). These numbers are
-from one machine and are not a universal claim.
+from one machine and are not a universal claim. The stylesheet is now 22.8 KiB
+because it carries twelve palettes; the original 3 KiB figure applied to the
+single-theme P0 UI and is recorded in the report.
 
 ## Reproducing the screenshots
 
 Every screenshot above was captured from a real running instance with
-Playwright, not drawn as a mockup. The demo notes and capture script are in the
-repository:
+Playwright, with **JavaScript disabled in the browser context**. The demo notes
+and capture script are in the repository:
 
 - [`scripts/demo-notes.py`](scripts/demo-notes.py) inserts a small set of
   realistic notes into a fresh database.
 - [`scripts/capture-screenshots.js`](scripts/capture-screenshots.js) logs in,
-  visits each page, triggers a real edit conflict, and writes the images into
-  `docs/screenshots/`.
+  visits each page, uploads a generated demo image, triggers a real edit
+  conflict, and writes the images into `docs/screenshots/`.
 
 To reproduce them on a scratch database, run the server in one terminal:
 
@@ -253,14 +303,17 @@ FEATHERNOTE_PASSWORD='demo password' \
 ```
 
 The demo password above and the default in the script are for throwaway local
-data only.
+data only. The script leaves the instance on the Feather theme.
 
 ## Repository layout
 
 ```
-src/            server, routes, SQLite layer, auth, HTML views, HTTP helpers
+src/            server, routes, SQLite layer, auth, HTML views
+src/markdown.zig  safe Markdown renderer
+src/multipart.zig bounded multipart/form-data parser
+src/themes.zig     the twelve theme ids
 assets.zig      build-time embedding of CSS and migrations
-web/style.css   the entire stylesheet (3 KiB)
+web/style.css   the entire stylesheet, all twelve themes
 migrations/     versioned SQL schema
 tests/          integration and adversarial HTTP suite
 scripts/        backup, restore, seed, benchmark, demo data, screenshots
@@ -275,8 +328,14 @@ vendor/sqlite/  pinned SQLite 3.54.1 amalgamation with checksums
 - One owner. No sharing, no teams, no public registration.
 - No password reset flow. A local operator runs
   `feathernote admin set-password`, which revokes all sessions.
-- Notes are plaintext on the server. Anyone who can read the database or its
-  backups can read the notes.
+- Notes and attachments are plaintext on the server. Anyone who can read the
+  database or its backups can read both.
+- No JavaScript means no paste-to-upload, drag and drop, live preview, or
+  keyboard shortcuts. Upload through the file form, then save.
+- Markdown is a deliberate subset. No tables, footnotes, task lists, or raw
+  HTML. Unsupported syntax degrades to text.
+- Attachments are capped at 8 MiB each and stored inside SQLite, so backups
+  grow with them. There are no thumbnails or image transcoding.
 - Search is word matching, not a query language.
 - No purge UI. Deleted notes stay in Trash until an operator removes them.
 - No background worker, polling loop, websocket, or sync protocol.
