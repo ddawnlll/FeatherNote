@@ -60,7 +60,7 @@ Admin commands print status and errors with `std.debug.print` (stderr). Tests ac
 
 ## D015 — Themes are server-side owner state, not a cookie or script
 
-The selected theme is a validated id stored on the single owner row and emitted as `data-theme` on `<html>`. One embedded stylesheet carries all twelve palettes. Switching is a CSRF-protected form post. This keeps the choice consistent across devices, includes it in backups, and avoids a theme-flash cookie or any client script. The CSS grew from 3 KiB to about 22 KiB; it is still a single embedded, cacheable request with no per-navigation cost.
+The selected theme is a validated id stored on the single owner row and emitted as `data-theme` on `<html>`. One embedded stylesheet carries all twelve palettes. Switching is a CSRF-protected form post. This keeps the choice consistent across devices, includes it in backups, and avoids a theme-flash cookie or any client script. The CSS grew from 3 KiB to about 23 KiB; it is still a single embedded, cacheable request with no per-navigation cost.
 
 ## D016 — Markdown is a safe, bounded subset rendered on the server
 

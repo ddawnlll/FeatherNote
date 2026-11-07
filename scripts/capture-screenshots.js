@@ -46,28 +46,25 @@ async function makeDemoImage(browser) {
   const page = await browser.newPage({ viewport: { width: 1200, height: 675 } });
   await page.setContent(`<!doctype html><style>
     html,body{margin:0;height:100%}
-    .art{width:1200px;height:675px;position:relative;overflow:hidden;
-      background:
-        radial-gradient(680px 420px at 18% 22%, #9fe3c1 0%, transparent 62%),
-        radial-gradient(720px 460px at 82% 18%, #f3c98b 0%, transparent 60%),
-        radial-gradient(820px 520px at 60% 108%, #587da8 0%, transparent 64%),
-        linear-gradient(160deg,#101b20 0%,#18302f 46%,#2a2130 100%);
-      color:#f8f3e8;font-family:Georgia,serif}
-    .grain{position:absolute;inset:0;opacity:.09;
-      background-image:repeating-linear-gradient(0deg,#fff 0 1px,transparent 1px 3px)}
-    .orb{position:absolute;width:340px;height:340px;border-radius:50%;
-      left:120px;top:120px;background:radial-gradient(circle at 34% 30%,#fffdf6,transparent 22%),
-      radial-gradient(circle,#ffd9a3 0%,#f09a6b 52%,#7c4a62 100%);
-      box-shadow:0 40px 120px rgba(0,0,0,.55);filter:saturate(1.1)}
-    .line{position:absolute;left:0;right:0;bottom:0;height:120px;
-      background:linear-gradient(180deg,transparent,rgba(0,0,0,.45))}
-    .copy{position:absolute;left:64px;bottom:56px;z-index:2}
-    .eyebrow{font:700 13px/1 ui-sans-serif,system-ui;letter-spacing:.24em;text-transform:uppercase;color:#b9e6cf}
-    h1{font-size:64px;line-height:1.02;margin:14px 0 0;letter-spacing:-.03em;max-width:12ch}
-    p{font:16px/1.5 ui-sans-serif,system-ui;color:#cfd9d4;margin:14px 0 0}
-  </style><div class="art"><div class="grain"></div><div class="orb"></div><div class="line"></div>
-  <div class="copy"><div class="eyebrow">Field notes</div><h1>Light, weather, and open water.</h1>
-  <p>A demo image uploaded through the file form, no JavaScript involved.</p></div></div>`);
+    .art{width:1200px;height:675px;position:relative;overflow:hidden;background:#14211f;color:#efe9dc;
+      font-family:"Iowan Old Style",Palatino,Georgia,serif}
+    .sky{position:absolute;inset:0 0 46% 0;background:#1c3330}
+    .sea{position:absolute;inset:54% 0 22% 0;background:#274b45}
+    .shore{position:absolute;inset:78% 0 0 0;background:#c9b79a}
+    .rule{position:absolute;left:72px;right:72px;top:72px;height:1px;background:#efe9dc;opacity:.5}
+    .rule2{position:absolute;left:72px;right:72px;bottom:72px;height:1px;background:#efe9dc;opacity:.35}
+    .mark{position:absolute;right:72px;top:64px;width:14px;height:14px;background:#b4372a}
+    .copy{position:absolute;left:72px;bottom:230px}
+    .kicker{font:700 12px/1 "Avenir Next",Avenir,sans-serif;letter-spacing:.22em;text-transform:uppercase;color:#c9b79a}
+    h1{font-size:64px;line-height:.98;margin:18px 0 0;letter-spacing:-.02em;max-width:11ch}
+    p{font:15px/1.5 "Avenir Next",Avenir,sans-serif;color:#cfd6cd;margin:18px 0 0;max-width:42ch}
+    .coord{position:absolute;right:72px;bottom:230px;text-align:right;
+      font:400 13px/1.6 "SF Mono",Menlo,monospace;color:#c9b79a}
+  </style><div class="art"><div class="sky"></div><div class="sea"></div><div class="shore"></div>
+  <div class="rule"></div><div class="rule2"></div><div class="mark"></div>
+  <div class="copy"><div class="kicker">Field notes / 07</div><h1>North water, low light.</h1>
+  <p>An upload from the file form. No scripts, no tracking, no external assets.</p></div>
+  <div class="coord">61.2181 N<br>149.9003 W<br>07:40</div></div>`);
   await page.screenshot({ path: file, clip: { x: 0, y: 0, width: 1200, height: 675 } });
   await page.close();
   return file;
@@ -97,7 +94,7 @@ async function makeDemoImage(browser) {
 
   // 3. Read view with Markdown
   await page.click('text=Zig 0.17 async I/O notes');
-  await page.waitForSelector('article.reader');
+  await page.waitForSelector('.prose');
   await page.waitForTimeout(900);
   await shotFit(page, 'note-read.png');
 
@@ -118,7 +115,7 @@ async function makeDemoImage(browser) {
   await page.waitForURL('**/edit?uploaded=1');
   await page.waitForTimeout(900);
   await page.click('a.tab:has-text("Read")');
-  await page.waitForSelector('article.reader');
+  await page.waitForSelector('.prose');
   await page.waitForTimeout(900);
   await shotFit(page, 'note-with-image.png');
 
@@ -154,7 +151,7 @@ async function makeDemoImage(browser) {
 
   // 11. Edit conflict, while in the dark theme.
   await page.click('text=Trip to Lisbon');
-  await page.waitForSelector('article.reader');
+  await page.waitForSelector('.prose');
   await page.click('a.tab:has-text("Edit")');
   await page.waitForSelector('#body');
   const noteUrl = page.url().replace('/edit', '');
@@ -171,13 +168,13 @@ async function makeDemoImage(browser) {
   });
   await page.fill('#body', 'Flights booked, 14-21 March.\n\nPlanning notes from this tab, which is now stale.');
   await page.click('.editor-form button[type=submit]');
-  await page.waitForSelector('text=Your draft (not saved)');
+  await page.waitForSelector('.diff-grid');
   await page.waitForTimeout(600);
   await shotFit(page, 'conflict.png');
 
   // 12. Restore the default theme for the next run.
   await page.goto(BASE + '/settings', { waitUntil: 'load' });
-  await page.click('label.theme-card:has(input[value=feather])');
+  await page.click('label.theme-card:has(input[value=paper])');
   await page.click('form.theme-form button[type=submit]');
   await page.waitForURL('**/settings?saved=1');
 

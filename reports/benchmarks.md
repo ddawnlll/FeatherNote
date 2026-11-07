@@ -50,7 +50,7 @@ All latencies are milliseconds, loopback, 1 KiB note bodies.
 | Idle PSS | reported | 4.64 MiB (4751 KiB) | 5.11 MiB (5237 KiB) | **PASS** |
 | Peak RSS (Argon2id login included) | separately recorded | 23.1 MiB (23688 KiB) | 23.4 MiB (23968 KiB) | **PASS, separate from idle** |
 | Peak RSS after 256 KiB note | separately recorded | 23.1 MiB | 23.4 MiB | **PASS** |
-| CSS | single embedded, cached stylesheet | 22,764 B (12 themes) | 22,764 B | **PASS, revised scope** |
+| CSS | single embedded, cached stylesheet | 23,085 B (12 themes) | 23,085 B | **PASS, revised scope** |
 | Mandatory JavaScript | 0 B | 0 B | 0 B | **PASS** |
 | List HTML at 50 rows, excluding note content | <= 15 KiB | 8,914 B | 9,143 B | **PASS** |
 | Warm GET note p95 | <= 15 ms | 3.20 ms | 1.09 ms | **PASS** |
@@ -63,7 +63,7 @@ All latencies are milliseconds, loopback, 1 KiB note bodies.
 
 The original 3 KiB CSS budget covered the single-theme P0 UI. The product
 later added twelve themes at the owner's request, so the stylesheet is now
-22,764 B. It remains one embedded, cacheable response rather than twelve
+23,085 B. It remains one embedded, cacheable response rather than twelve
 downloads, and no per-page CSS cost was added.
 
 ### Detailed percentiles

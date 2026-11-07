@@ -180,6 +180,12 @@ Flags override environment values. The full list is available with
   row. Every page emits it as `data-theme`, and one embedded stylesheet carries
   all twelve palettes. Swapping themes costs one form post and one cached
   stylesheet.
+- **One design system.** The editorial ledger direction, tokens, type, and
+  motion rules live in [`DESIGN.md`](DESIGN.md). The default palette is cool
+  paper with a vermilion accent; the index is ruled, not a card grid.
+- **CSS-only page transitions.** Cross-document View Transitions animate page
+  changes with transform and opacity, leaving the header fixed. Nothing is
+  scripted, and reduced-motion turns it off.
 - **CSRF on every authenticated mutation**, including logout, theme changes,
   uploads, and file deletion. Login is rate limited and runs a full Argon2id
   verification.
@@ -266,7 +272,7 @@ Benchmarks are measured, not estimated. On the recorded Debian 13 machine
 Commands, percentiles, machine details, and the items that remain UNVERIFIED
 are in [`reports/benchmarks.md`](reports/benchmarks.md), with raw JSON in
 [`reports/benchmarks-raw.json`](reports/benchmarks-raw.json). These numbers are
-from one machine and are not a universal claim. The stylesheet is now 22.8 KiB
+from one machine and are not a universal claim. The stylesheet is now 22.5 KiB
 because it carries twelve palettes; the original 3 KiB figure applied to the
 single-theme P0 UI and is recorded in the report.
 
@@ -303,11 +309,12 @@ FEATHERNOTE_PASSWORD='demo password' \
 ```
 
 The demo password above and the default in the script are for throwaway local
-data only. The script leaves the instance on the Feather theme.
+data only. The script leaves the instance on the Paper theme.
 
 ## Repository layout
 
 ```
+DESIGN.md       design system, tokens, motion rules, and slop audit
 src/            server, routes, SQLite layer, auth, HTML views
 src/markdown.zig  safe Markdown renderer
 src/multipart.zig bounded multipart/form-data parser
