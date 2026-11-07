@@ -1,5 +1,5 @@
 //! Theme registry. The ids must match the `[data-theme="..."]` blocks in
-//! web/style.css.
+//! web/style.css. Legacy ids from earlier releases map onto the new set.
 const std = @import("std");
 
 pub const Theme = struct {
@@ -9,18 +9,18 @@ pub const Theme = struct {
 };
 
 pub const all = [_]Theme{
-    .{ .id = "feather", .name = "Feather", .mode = "light" },
-    .{ .id = "feather-dark", .name = "Feather Dark", .mode = "dark" },
+    .{ .id = "paper", .name = "Paper", .mode = "light" },
+    .{ .id = "ink", .name = "Ink", .mode = "dark" },
     .{ .id = "midnight", .name = "Midnight", .mode = "dark" },
-    .{ .id = "obsidian", .name = "Obsidian", .mode = "dark" },
+    .{ .id = "graphite", .name = "Graphite", .mode = "dark" },
     .{ .id = "forest", .name = "Forest", .mode = "dark" },
-    .{ .id = "ocean", .name = "Ocean", .mode = "dark" },
-    .{ .id = "plum", .name = "Plum", .mode = "dark" },
+    .{ .id = "fjord", .name = "Fjord", .mode = "dark" },
+    .{ .id = "wine", .name = "Wine", .mode = "dark" },
     .{ .id = "ember", .name = "Ember", .mode = "dark" },
     .{ .id = "sand", .name = "Sand", .mode = "light" },
-    .{ .id = "mono", .name = "Mono", .mode = "light" },
+    .{ .id = "newsprint", .name = "Newsprint", .mode = "light" },
     .{ .id = "rose", .name = "Rose", .mode = "light" },
-    .{ .id = "neon", .name = "Neon", .mode = "dark" },
+    .{ .id = "signal", .name = "Signal", .mode = "dark" },
 };
 
 pub fn isValid(id: []const u8) bool {
@@ -30,7 +30,24 @@ pub fn isValid(id: []const u8) bool {
     return false;
 }
 
-test "theme ids are unique and valid" {
+/// Maps ids used by earlier releases onto the current palette family.
+pub fn canonical(id: []const u8) []const u8 {
+    const legacy = [_]struct { old: []const u8, new: []const u8 }{
+        .{ .old = "feather", .new = "paper" },
+        .{ .old = "feather-dark", .new = "ink" },
+        .{ .old = "obsidian", .new = "graphite" },
+        .{ .old = "ocean", .new = "fjord" },
+        .{ .old = "plum", .new = "wine" },
+        .{ .old = "mono", .new = "newsprint" },
+        .{ .old = "neon", .new = "signal" },
+    };
+    for (legacy) |entry| {
+        if (std.mem.eql(u8, entry.old, id)) return entry.new;
+    }
+    return if (isValid(id)) id else "paper";
+}
+
+test "theme ids are unique and legacy ids map" {
     for (all, 0..) |theme, i| {
         try std.testing.expect(isValid(theme.id));
         for (all[i + 1 ..]) |other| {
@@ -38,4 +55,7 @@ test "theme ids are unique and valid" {
         }
     }
     try std.testing.expect(!isValid("missing"));
+    try std.testing.expectEqualStrings("paper", canonical("feather"));
+    try std.testing.expectEqualStrings("signal", canonical("neon"));
+    try std.testing.expectEqualStrings("paper", canonical("nonsense"));
 }
