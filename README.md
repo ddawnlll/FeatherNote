@@ -6,6 +6,7 @@
 ![SQLite 3.54.1](https://img.shields.io/badge/sqlite-3.54.1-003b57)
 ![No JavaScript](https://img.shields.io/badge/javascript-0%20bytes-1d5c46)
 ![Themes](https://img.shields.io/badge/themes-12-c07a3c)
+![MCP](https://img.shields.io/badge/mcp-stdio-1d6b50)
 
 ![The FeatherNote notes list](docs/screenshots/notes-list.png)
 
@@ -159,6 +160,22 @@ Configuration can also come from the environment:
 Flags override environment values. The full list is available with
 `feathernote --help`.
 
+## Use it from an MCP client
+
+The same binary is a local stdio MCP server, so Claude, Cursor, Codex, or any
+other MCP client can read and write notes. It is read-only unless you opt in:
+
+```sh
+feathernote mcp --db data/feathernote.db --allow-write
+```
+
+It exposes 17 tools, including search, read, create, append, pin, delete,
+restore, base64 attachments, and theme control, plus
+`feathernote://notes/{id}` resources. Writes require the note version, so a
+stale update returns a conflict with the latest note instead of overwriting it.
+There is no listener and no token. Client configuration, tool reference, and
+security notes are in [`docs/MCP.md`](docs/MCP.md).
+
 ## How it is put together
 
 - **One process, one database connection.** A mutex serializes access, which
@@ -186,6 +203,9 @@ Flags override environment values. The full list is available with
 - **CSS-only page transitions.** Cross-document View Transitions animate page
   changes with transform and opacity, leaving the header fixed. Nothing is
   scripted, and reduced-motion turns it off.
+- **Local MCP server.** One stdio subcommand reuses the same schema, FTS
+  search, version checks, and attachment validation as the web app. It binds
+  no port and defaults to read-only.
 - **CSRF on every authenticated mutation**, including logout, theme changes,
   uploads, and file deletion. Login is rate limited and runs a full Argon2id
   verification.
@@ -245,6 +265,7 @@ server reads plaintext.
 ```sh
 zig build test                 # unit tests: Markdown, multipart, CRUD, search
 python3 tests/integration.py   # 88 real HTTP checks, no JavaScript
+python3 tests/mcp_test.py      # 46 stdio MCP protocol checks
 python3 scripts/bench.py --requests 200 --counts 100,10000
 ```
 
@@ -319,13 +340,15 @@ src/            server, routes, SQLite layer, auth, HTML views
 src/markdown.zig  safe Markdown renderer
 src/multipart.zig bounded multipart/form-data parser
 src/themes.zig     the twelve theme ids
+src/mcp.zig       stdio MCP server
+src/media.zig     shared attachment sniffing and naming
 assets.zig      build-time embedding of CSS and migrations
 web/style.css   the entire stylesheet, all twelve themes
 migrations/     versioned SQL schema
 tests/          integration and adversarial HTTP suite
 scripts/        backup, restore, seed, benchmark, demo data, screenshots
 deploy/         systemd units and nginx examples
-docs/           deployment guide, decision log, screenshots
+docs/           deployment guide, MCP guide, decision log, screenshots
 reports/        measured benchmark evidence
 vendor/sqlite/  pinned SQLite 3.54.1 amalgamation with checksums
 ```

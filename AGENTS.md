@@ -17,7 +17,8 @@ process binds loopback; nginx is the public TLS listener.
 zig build --release=safe      # stripped release binary: zig-out/bin/feathernote
 zig build                     # debug build
 zig build test                # Zig unit tests
-python3 tests/integration.py  # real HTTP acceptance/security tests (67 checks)
+python3 tests/integration.py  # real HTTP acceptance/security tests (88 checks)
+python3 tests/mcp_test.py     # stdio MCP protocol and tool checks (46 checks)
 python3 scripts/bench.py --requests 200 --counts 100,10000
 ```
 
@@ -132,6 +133,8 @@ bodies.
 - SQL is parameterized; FTS5 input is quoted into a restricted phrase grammar.
 - HTML output is escaped, including `</textarea>`.
 - App stays on loopback; nginx owns public TLS.
+- The MCP server is stdio-only, binds no port, and is read-only unless
+  `--allow-write` is passed. It must reuse the SQLite layer, not duplicate it.
 - Performance claims must come from `reports/benchmarks.md` measurements, not
   guesses. Mark anything unmeasured UNVERIFIED.
 
