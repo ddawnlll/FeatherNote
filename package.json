@@ -1,0 +1,12 @@
+{
+  "name": "feathernote-screenshot-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Development-only Playwright helpers for capturing the README screenshots",
+  "scripts": {
+    "screenshots": "node scripts/capture-screenshots.js"
+  },
+  "devDependencies": {
+    "playwright": "1.65.0"
+  }
+}

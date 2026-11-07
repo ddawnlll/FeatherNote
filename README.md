@@ -145,7 +145,7 @@ Flags override environment values. The full list is available with
 - **Escaped output everywhere**, including `</textarea>`. The CSP is
   `default-src 'none'` with only local styles allowed.
 - **Embedded assets.** The stylesheet and migrations are compiled into the
-  binary, so the executable has no runtime path assumptions.
+  binary, so the executable has no runtime asset paths.
 - **FTS5 search** through an external-content index with triggers, so note
   bodies are stored once.
 
@@ -232,8 +232,24 @@ repository:
   visits each page, triggers a real edit conflict, and writes the images into
   `docs/screenshots/`.
 
-Point `FEATHERNOTE_URL` at a local demo server, install Playwright, and run the
-script. The demo password in the script is for throwaway local data only.
+To reproduce them on a scratch database:
+
+```sh
+printf '%s\n' 'demo password' | \
+  ./zig-out/bin/feathernote admin set-password --db data/demo.db
+python3 scripts/demo-notes.py data/demo.db
+./zig-out/bin/feathernote serve --db data/demo.db \
+  --listen 127.0.0.1:8090 --insecure-cookies
+
+npm install
+npx playwright install chromium
+FEATHERNOTE_URL=http://127.0.0.1:8090 \
+FEATHERNOTE_PASSWORD='demo password' \
+  npm run --silent screenshots
+```
+
+The demo password above and the default in the script are for throwaway local
+data only.
 
 ## Repository layout
 

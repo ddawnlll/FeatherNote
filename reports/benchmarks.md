@@ -5,7 +5,7 @@
 **Binary:** 2,406,040 bytes
 **SQLite:** 3.54.1 amalgamation compiled from `vendor/sqlite/sqlite3.c`
 **Zig:** 0.17.1
-**Status:** P0 application targets measured and passing. Proxy, live HTTPS, one-hour idle CPU, and pixel screenshots are explicitly UNVERIFIED below.
+**Status:** P0 application targets measured and passing. Proxy, live HTTPS, and one-hour idle CPU remain UNVERIFIED below. Screenshots were later captured for documentation, but there is no pixel-diff regression harness.
 
 ## Environment
 
@@ -50,7 +50,7 @@ All latencies are milliseconds, loopback, 1 KiB note bodies.
 | Idle PSS | reported | 4.64 MiB (4751 KiB) | 5.11 MiB (5237 KiB) | **PASS** |
 | Peak RSS (Argon2id login included) | separately recorded | 23.1 MiB (23688 KiB) | 23.4 MiB (23968 KiB) | **PASS, separate from idle** |
 | Peak RSS after 256 KiB note | separately recorded | 23.1 MiB | 23.4 MiB | **PASS** |
-| CSS | <= 3 KiB (3072 B) | 3,047 B | 3,047 B | **PASS** |
+| CSS | <= 3 KiB (3072 B) | 3,072 B | 3,072 B | **PASS** (remeasured after the header layout fix) |
 | Mandatory JavaScript | 0 B | 0 B | 0 B | **PASS** |
 | List HTML at 50 rows, excluding note content | <= 15 KiB | 8,914 B | 9,143 B | **PASS** |
 | Warm GET note p95 | <= 15 ms | 3.20 ms | 1.09 ms | **PASS** |
@@ -139,7 +139,7 @@ VmRSS           = 5684 kB     (5.55 MiB)
 | 1-hour idle CPU | **UNVERIFIED** | Only a 5-second sample was run; the process has no timer/loop, so the sample is 0 ticks, but a full hour was not observed. |
 | App + reverse-proxy idle RSS | **UNVERIFIED** | Nginx is not installed in this environment. The app alone is measured; no proxy number is fabricated. |
 | Live HTTPS deployment | **UNVERIFIED** | No public host, domain, certificate, or sudo access was available. Nginx/systemd samples are provided but not executed here. |
-| Browser screenshots at phone/desktop widths | **UNVERIFIED** | No browser binary is installed. Responsive HTML/CSS is exercised by HTTP tests and the media queries are present, but no pixel screenshot was captured. |
+| Browser screenshots at phone/desktop widths | **VERIFIED, capture only** | Playwright captures at 1280 px and 390 px are in `docs/screenshots/` and are reproducible with `scripts/capture-screenshots.js`. No pixel-diff baseline exists. |
 | 256 KiB note p95 | single sample only | The benchmark records one large-note POST, not a 200-sample distribution. |
 
 ## Reproduction caveats
