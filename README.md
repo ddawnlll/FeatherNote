@@ -60,15 +60,26 @@ the latest version is a separate, explicit click.
 
 ![The edit conflict page with both versions](docs/screenshots/conflict.png)
 
-### Trash, login, and a blank note
+### Trash
 
-| Deleted notes are recoverable | One password, no registration |
-|---|---|
-| <img src="docs/screenshots/trash.png" alt="Trash with two deleted notes"> | <img src="docs/screenshots/login.png" alt="Login page"> |
+Deleted notes wait in Trash until an operator removes them. Restore puts a
+note back in the list with a new version.
 
-| Starting a new note |
-|---|
-| <img src="docs/screenshots/new-note.png" alt="New note form"> |
+![Trash with two deleted notes](docs/screenshots/trash.png)
+
+### Log in
+
+One password, no registration, no account recovery through email. If you lose
+the password, a local operator resets it and revokes every session.
+
+![Login page](docs/screenshots/login.png)
+
+### Starting a new note
+
+The composer is a title and a plain text box. No toolbar, no block editor, no
+autosave race.
+
+![New note form](docs/screenshots/new-note.png)
 
 ### On a phone
 
