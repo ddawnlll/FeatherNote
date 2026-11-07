@@ -232,7 +232,7 @@ repository:
   visits each page, triggers a real edit conflict, and writes the images into
   `docs/screenshots/`.
 
-To reproduce them on a scratch database:
+To reproduce them on a scratch database, run the server in one terminal:
 
 ```sh
 printf '%s\n' 'demo password' | \
@@ -240,7 +240,11 @@ printf '%s\n' 'demo password' | \
 python3 scripts/demo-notes.py data/demo.db
 ./zig-out/bin/feathernote serve --db data/demo.db \
   --listen 127.0.0.1:8090 --insecure-cookies
+```
 
+Then, in a second terminal (Node 18 or newer), capture the images:
+
+```sh
 npm install
 npx playwright install chromium
 FEATHERNOTE_URL=http://127.0.0.1:8090 \
