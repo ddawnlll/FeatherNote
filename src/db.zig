@@ -21,6 +21,15 @@ pub const NoteRow = struct {
     is_pinned: bool,
 };
 
+pub const SearchRow = struct {
+    id: i64,
+    title: []const u8,
+    snippet: []const u8,
+    updated_at: i64,
+    version: i64,
+    is_pinned: bool,
+};
+
 pub const Note = struct {
     id: i64,
     title: []const u8,
@@ -565,6 +574,23 @@ pub const Db = struct {
         return self.classifyWriteFailure(id);
     }
 
+    pub fn setPinned(self: *Db, id: i64, expected_version: i64, pinned: bool, now: i64) !WriteResult {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare(
+            \\UPDATE notes SET is_pinned = ?, version = version + 1, updated_at = ?
+            \\WHERE id = ? AND version = ? AND deleted_at IS NULL
+        );
+        defer stmt.deinit();
+        try stmt.bindInt(1, if (pinned) 1 else 0);
+        try stmt.bindInt(2, now);
+        try stmt.bindInt(3, id);
+        try stmt.bindInt(4, expected_version);
+        if (try stmt.step() != c.SQLITE_DONE) return error.Sqlite;
+        if (c.sqlite3_changes(self.handle) == 1) return .ok;
+        return self.classifyWriteFailure(id);
+    }
+
     pub fn softDelete(self: *Db, id: i64, expected_version: i64, now: i64) !WriteResult {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -676,6 +702,44 @@ pub const Db = struct {
         return c.sqlite3_column_int64(stmt.handle, 0);
     }
 
+    pub fn searchNotes(
+        self: *Db,
+        allocator: Allocator,
+        query: []const u8,
+        offset: usize,
+        limit: usize,
+    ) ![]SearchRow {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var rows: std.ArrayList(SearchRow) = .empty;
+        errdefer rows.deinit(allocator);
+        const fts = try makeFtsQuery(allocator, query);
+        defer if (fts) |text| allocator.free(text);
+        if (fts == null) return rows.toOwnedSlice(allocator);
+        var stmt = try self.prepare(
+            \\SELECT n.id, n.title, snippet(notes_fts, 1, '', '', '…', 14),
+            \\       n.updated_at, n.version, n.is_pinned
+            \\FROM notes_fts JOIN notes n ON n.id = notes_fts.rowid
+            \\WHERE notes_fts MATCH ? AND n.deleted_at IS NULL
+            \\ORDER BY n.is_pinned DESC, n.updated_at DESC, n.id DESC LIMIT ? OFFSET ?
+        );
+        defer stmt.deinit();
+        try stmt.bindText(1, fts.?);
+        try stmt.bindInt(2, @intCast(limit));
+        try stmt.bindInt(3, @intCast(offset));
+        while (try stmt.step() == c.SQLITE_ROW) {
+            try rows.append(allocator, .{
+                .id = c.sqlite3_column_int64(stmt.handle, 0),
+                .title = try self.columnText(&stmt, 1, allocator),
+                .snippet = try self.columnText(&stmt, 2, allocator),
+                .updated_at = c.sqlite3_column_int64(stmt.handle, 3),
+                .version = c.sqlite3_column_int64(stmt.handle, 4),
+                .is_pinned = c.sqlite3_column_int64(stmt.handle, 5) != 0,
+            });
+        }
+        return rows.toOwnedSlice(allocator);
+    }
+
     pub fn listTrash(self: *Db, allocator: Allocator, offset: usize, limit: usize) ![]TrashRow {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -705,6 +769,15 @@ pub const Db = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         var stmt = try self.prepare("SELECT COUNT(*) FROM notes WHERE deleted_at IS NOT NULL");
+        defer stmt.deinit();
+        if (try stmt.step() != c.SQLITE_ROW) return error.Sqlite;
+        return c.sqlite3_column_int64(stmt.handle, 0);
+    }
+
+    pub fn countAttachments(self: *Db) !i64 {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare("SELECT COUNT(*) FROM attachments");
         defer stmt.deinit();
         if (try stmt.step() != c.SQLITE_ROW) return error.Sqlite;
         return c.sqlite3_column_int64(stmt.handle, 0);

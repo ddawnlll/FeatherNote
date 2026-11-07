@@ -9,6 +9,8 @@ const views = @import("views.zig");
 const themes = @import("themes.zig");
 const multipart = @import("multipart.zig");
 const markdown = @import("markdown.zig");
+const media = @import("media.zig");
+const mcp = @import("mcp.zig");
 const assets = @import("assets");
 
 const Allocator = std.mem.Allocator;
@@ -78,6 +80,10 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, command, "serve")) {
         const cfg = parseConfig(init.environ_map.*, &it);
         try serve(gpa, io, cfg);
+    } else if (std.mem.eql(u8, command, "mcp")) {
+        const options = parseMcpOptions(init.environ_map.*, &it);
+        try ensureParent(io, options.db_path);
+        try mcp.run(gpa, io, options);
     } else if (std.mem.eql(u8, command, "admin")) {
         const sub = it.next() orelse {
             std.debug.print("usage: feathernote admin set-password|backup|integrity [--db PATH] [--out PATH]\n", .{});
@@ -114,11 +120,30 @@ fn printUsage() void {
         \\FeatherNote
         \\  feathernote serve [--db PATH] [--listen 127.0.0.1:8080]
         \\                   [--insecure-cookies] [--trust-proxy] [--allow-public-bind]
+        \\  feathernote mcp [--db PATH] [--allow-write]   (stdio MCP server)
         \\  feathernote admin set-password [--db PATH]   (reads one line from stdin)
         \\  feathernote admin backup [--db PATH] --out PATH
         \\  feathernote admin integrity [--db PATH]
         \\
     , .{});
+}
+
+fn parseMcpOptions(env: std.process.Environ.Map, it: *std.process.Args.Iterator) mcp.Options {
+    var options = mcp.Options{
+        .db_path = env.get("FEATHERNOTE_DB") orelse "data/feathernote.db",
+        .allow_write = false,
+    };
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--db")) {
+            options.db_path = it.next() orelse fatal("--db requires a path");
+        } else if (std.mem.eql(u8, arg, "--allow-write")) {
+            options.allow_write = true;
+        } else {
+            std.debug.print("unknown option: {s}\n", .{arg});
+            std.process.exit(2);
+        }
+    }
+    return options;
 }
 
 fn parseConfig(env: std.process.Environ.Map, it: *std.process.Args.Iterator) Config {
@@ -411,8 +436,8 @@ fn readBodyLimited(request: *http.Server.Request, arena: Allocator, limit: usize
 fn isFormContentType(content_type: ?[]const u8) bool {
     const ct = content_type orelse return false;
     const semi = std.mem.findScalar(u8, ct, ';') orelse ct.len;
-    const media = std.mem.trim(u8, ct[0..semi], " \t");
-    return std.ascii.eqlIgnoreCase(media, "application/x-www-form-urlencoded");
+    const media_type = std.mem.trim(u8, ct[0..semi], " \t");
+    return std.ascii.eqlIgnoreCase(media_type, "application/x-www-form-urlencoded");
 }
 
 fn authenticate(app: *App, arena: Allocator, cookie: ?[]const u8, now: i64) !?Auth {
@@ -768,9 +793,8 @@ fn handleUpload(
         return htmlError(arena, ctx, .payload_too_large, "File too large", "Uploads are limited to 8 MiB.");
     }
 
-    const filename = try sanitizeFilename(arena, file.filename.?);
-    const mime = sniffMime(file.data);
-    const is_image = std.mem.startsWith(u8, mime, "image/");
+    const filename = try media.sanitizeFilename(arena, file.filename.?);
+    const mime = media.sniffMime(file.data);
 
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(file.data, &digest, .{});
@@ -786,7 +810,7 @@ fn handleUpload(
         return htmlError(arena, ctx, .internal_server_error, "Upload failed", "The file could not be stored.");
     };
 
-    const new_body = try appendFileLink(arena, note.body, attachment_id, filename, is_image);
+    const new_body = try media.appendFileLink(arena, note.body, attachment_id, filename, mime);
     if (new_body.len > util.max_body_bytes) {
         _ = app.database.deleteAttachment(attachment_id, id) catch {};
         return htmlError(arena, ctx, .payload_too_large, "Note is full", "The note is already at its 256 KiB limit. Shorten it before adding files.");
@@ -802,36 +826,14 @@ fn handleUpload(
     return .{ .status = .see_other, .location = try std.fmt.allocPrint(arena, "/notes/{d}/edit?uploaded=1", .{id}) };
 }
 
-fn appendFileLink(arena: Allocator, body: []const u8, attachment_id: i64, filename: []const u8, is_image: bool) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    try out.appendSlice(arena, body);
-    if (body.len > 0) try out.appendSlice(arena, "\n\n");
-    var encoded_buffer: [1024]u8 = undefined;
-    var ew = std.Io.Writer.fixed(&encoded_buffer);
-    try util.urlEncode(&ew, filename);
-    const encoded = ew.buffered();
-    if (is_image) {
-        try out.appendSlice(arena, "![");
-        try out.appendSlice(arena, filename);
-        try out.appendSlice(arena, "](/files/");
-    } else {
-        try out.appendSlice(arena, "[");
-        try out.appendSlice(arena, filename);
-        try out.appendSlice(arena, "](/files/");
-    }
-    const tail = try std.fmt.allocPrint(arena, "{d}/{s})", .{ attachment_id, encoded });
-    try out.appendSlice(arena, tail);
-    return out.toOwnedSlice(arena);
-}
-
 fn handleFile(app: *App, arena: Allocator, ctx: views.Ctx, id: i64) !Response {
     const attachment = try app.database.attachment(arena, id) orelse return notFound(arena, ctx);
     const note = try app.database.getNote(arena, attachment.meta.note_id, false) orelse return notFound(arena, ctx);
     _ = note;
-    const is_image = std.mem.startsWith(u8, attachment.meta.mime, "image/");
+    const is_image = media.isImage(attachment.meta.mime);
     const disposition = try std.fmt.allocPrint(arena, "{s}; filename=\"{s}\"", .{
         if (is_image) "inline" else "attachment",
-        try asciiFilename(arena, attachment.meta.filename),
+        try media.asciiFilename(arena, attachment.meta.filename),
     });
     const etag = try std.fmt.allocPrint(arena, "\"{s}\"", .{attachment.meta.sha256});
     return .{
@@ -859,59 +861,6 @@ fn handleDeleteFile(
     if (!csrfOk(ctx.csrf, form)) return csrfFailure(arena, ctx);
     _ = try app.database.deleteAttachment(file_id, note_id);
     return .{ .status = .see_other, .location = try std.fmt.allocPrint(arena, "/notes/{d}/edit", .{note_id}) };
-}
-
-fn sanitizeFilename(arena: Allocator, raw: []const u8) ![]const u8 {
-    const base_raw = basename(raw);
-    const valid_utf8 = std.unicode.utf8ValidateSlice(base_raw);
-    var out: std.ArrayList(u8) = .empty;
-    for (base_raw) |ch| {
-        if (out.items.len >= 120) break;
-        const keep = std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.' or
-            ch == ' ' or ch == '(' or ch == ')' or (valid_utf8 and ch >= 0x80);
-        try out.append(arena, if (keep) ch else '_');
-    }
-    const trimmed = std.mem.trim(u8, out.items, " .");
-    if (trimmed.len == 0) return allocatorLiteral(arena);
-    return trimmed;
-}
-
-fn allocatorLiteral(arena: Allocator) ![]const u8 {
-    return arena.dupe(u8, "file");
-}
-
-fn basename(path: []const u8) []const u8 {
-    const slash = std.mem.lastIndexOfScalar(u8, path, '/');
-    const backslash = std.mem.lastIndexOfScalar(u8, path, '\\');
-    const idx: ?usize = if (slash == null) backslash else if (backslash == null) slash else @max(slash.?, backslash.?);
-    if (idx) |i| return path[i + 1 ..];
-    return path;
-}
-
-fn asciiFilename(arena: Allocator, name: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    for (name) |ch| {
-        if (ch >= 0x20 and ch < 0x7f and ch != '"' and ch != '\\') {
-            try out.append(arena, ch);
-        } else {
-            try out.append(arena, '_');
-        }
-    }
-    const trimmed = std.mem.trim(u8, out.items, " ");
-    if (trimmed.len == 0) return arena.dupe(u8, "file");
-    return trimmed;
-}
-
-fn sniffMime(data: []const u8) []const u8 {
-    if (std.mem.startsWith(u8, data, "\x89PNG\r\n\x1a\n")) return "image/png";
-    if (data.len >= 3 and data[0] == 0xff and data[1] == 0xd8 and data[2] == 0xff) return "image/jpeg";
-    if (std.mem.startsWith(u8, data, "GIF87a") or std.mem.startsWith(u8, data, "GIF89a")) return "image/gif";
-    if (data.len >= 12 and std.mem.eql(u8, data[0..4], "RIFF") and std.mem.eql(u8, data[8..12], "WEBP")) return "image/webp";
-    if (data.len >= 12 and std.mem.eql(u8, data[4..8], "ftyp") and
-        (std.mem.eql(u8, data[8..12], "avif") or std.mem.eql(u8, data[8..12], "avis"))) return "image/avif";
-    if (std.mem.startsWith(u8, data, "%PDF-")) return "application/pdf";
-    if (std.mem.findScalar(u8, data, 0) == null and std.unicode.utf8ValidateSlice(data)) return "text/plain; charset=utf-8";
-    return "application/octet-stream";
 }
 
 fn handleRead(app: *App, arena: Allocator, ctx: views.Ctx, id: i64, saved: bool) !Response {
@@ -1148,4 +1097,6 @@ test {
     _ = markdown;
     _ = multipart;
     _ = themes;
+    _ = media;
+    _ = mcp;
 }
