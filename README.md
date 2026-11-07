@@ -110,7 +110,7 @@ zig build test          # Zig unit tests: CRUD, search, conflicts, sessions
 python3 tests/integration.py   # real server, adversarial HTTP, restart, backup/restore
 ```
 
-The integration suite drives the compiled server over TCP with no JavaScript and checks login, unauthorized access, all note operations, 409 draft preservation, CSRF, XSS/`</textarea>` escaping, SQL injection in search and login, invalid UTF-8, oversized bodies, disallowed methods, logout revocation, restart persistence, an online backup taken while 40 concurrent saves are in flight, restore into a fresh directory, security headers, and absence of secrets in logs. It executes 62 checks.
+The integration suite drives the compiled server over TCP with no JavaScript and checks login, unauthorized access, all note operations, 409 draft preservation, CSRF, XSS/`</textarea>` escaping, SQL injection in search and login, invalid UTF-8, oversized bodies, disallowed methods, logout revocation, restart persistence, survival of an acknowledged write after `SIGKILL`, an online backup taken while 40 concurrent saves are in flight, restore into a fresh directory, security headers, and absence of secrets in logs. It executes 67 checks.
 
 ## Benchmarks
 
@@ -126,6 +126,7 @@ Measured results, commands, machine details, and PASS/FAIL/UNVERIFIED status are
 - Sessions have an absolute 30-day lifetime by default. `last_used_at` is refreshed at most hourly. Logout revokes the server-side session.
 - Soft-deleted notes remain in Trash. There is no purge UI in P0; an operator can remove them with SQL after taking a backup.
 - One SQLite connection is serialized by a mutex. This keeps memory predictable for one owner; the schema and service API do not assume a connection pool.
+- At most 64 connections are admitted at once; excess loopback connections are closed immediately. The reverse proxy is still expected to enforce its own connection and body limits.
 - WAL mode with `synchronous=FULL`. Acknowledged writes are committed and synced before the response. WAL is checkpointed on normal shutdown; after a crash SQLite recovers automatically.
 - The service has no background worker, polling loop, websocket, or timer. Idle CPU measured at 0.0 s over a 5 s sample.
 - There is no graceful-shutdown signal handler. `SIGTERM` terminates the process; committed notes survive, and SQLite recovers the WAL on the next start.

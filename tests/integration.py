@@ -295,6 +295,21 @@ def main():
         status, _, body = c2.get("/notes")
         check("note survives process restart", status == 200 and b"First update" in body)
 
+        # SIGKILL immediately after an acknowledged write. WAL + synchronous=FULL
+        # must preserve the committed note without a graceful close.
+        _, _, new_edit = c2.get("/notes/new")
+        new_csrf = csrf_of(new_edit)
+        status, headers, _ = c2.form("/notes", {"title": "Crash durable", "body": "acknowledged before kill"},
+                                     csrf=new_csrf)
+        check("crash-test note acknowledged", status == 303, status)
+        proc.kill()
+        proc.wait(timeout=10)
+        proc = start_server(binary, db_path, port, log_path)
+        c3 = Client(port)
+        login(c3)
+        status, _, body = c3.get("/notes")
+        check("acknowledged note survives SIGKILL", status == 200 and b"Crash durable" in body)
+
         # Consistent online backup while the server is running.
         wc = Client(port)
         login(wc)
