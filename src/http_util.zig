@@ -7,6 +7,8 @@ pub const max_title_bytes: usize = 1024;
 pub const max_title_codepoints: usize = 200;
 pub const max_body_bytes: usize = 256 * 1024;
 pub const max_request_body: usize = 320 * 1024;
+pub const max_upload_bytes: usize = 8 * 1024 * 1024;
+pub const max_upload_request: usize = max_upload_bytes + 64 * 1024;
 pub const max_search_bytes: usize = 100;
 pub const page_size: usize = 50;
 

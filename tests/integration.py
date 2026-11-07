@@ -112,6 +112,22 @@ def version_of(html):
     return int(m.group(1)) if m else None
 
 
+def multipart_body(fields, filename, content, content_type="image/png", boundary="----feathernoteTestBoundary"):
+    chunks = []
+    for name, value in fields.items():
+        chunks.append(f"--{boundary}\r\n".encode())
+        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        chunks.append(value.encode() + b"\r\n")
+    chunks.append(f"--{boundary}\r\n".encode())
+    chunks.append(
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode()
+    )
+    chunks.append(f"Content-Type: {content_type}\r\n\r\n".encode())
+    chunks.append(content + b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
 def start_server(binary, db_path, port, log_path):
     log = open(log_path, "ab")
     proc = subprocess.Popen(
@@ -184,7 +200,22 @@ def main():
         check("empty note list renders", status == 200 and b"No notes yet" in body)
         check("authenticated page is no-store", headers.get("cache-control") == "no-store")
         check("CSP denies scripts", "default-src 'none'" in headers.get("content-security-policy", ""))
+        check("CSP allows same-origin images", "img-src 'self'" in headers.get("content-security-policy", ""))
         check("nosniff header present", headers.get("x-content-type-options") == "nosniff")
+        check("pages contain no script tags", b"<script" not in body)
+
+        status, _, body = c.get("/settings")
+        check("theme page lists twelve themes", status == 200 and body.count(b'class="theme-card"') == 12)
+        csrf = csrf_of(body)
+        status, headers, _ = c.form("/settings/theme", {"theme": "neon"}, csrf=csrf)
+        check("theme change redirects", status == 303 and headers.get("location") == "/settings?saved=1")
+        status, _, body = c.get("/settings?saved=1")
+        check("selected theme is applied", b'data-theme="neon"' in body and b"Theme updated." in body)
+        status, _, _ = c.form("/settings/theme", {"theme": "not-a-theme"}, csrf=csrf)
+        check("unknown theme is rejected", status == 400, status)
+        status, _, _ = c.form("/settings/theme", {"theme": "midnight"}, csrf="0" * 64)
+        check("theme change requires CSRF", status == 403, status)
+        c.form("/settings/theme", {"theme": "feather"}, csrf=csrf)
 
         status, _, body = c.get("/notes/new")
         csrf = csrf_of(body)
@@ -204,15 +235,15 @@ def main():
         check("list includes escaped title", b"Gr&uuml;" not in body and b"&lt;script&gt;" in body)
 
         status, _, body = c.get("/notes?q=" + urllib.parse.quote("Köln"))
-        check("search by Unicode title", status == 200 and b"1 result(s)" in body)
+        check("search by Unicode title", status == 200 and b"1 result for" in body)
         status, _, body = c.get("/notes?q=" + urllib.parse.quote("<script>alert"))
         check("search output escapes reflected query", b"&lt;script&gt;" in body and b"<script>alert" not in body)
         status, _, body = c.get("/notes?q=" + urllib.parse.quote("' OR 1=1 --"))
         check("SQL injection search returns no rows", status == 200 and b"No notes matched" in body)
         status, _, body = c.get("/notes?q=" + urllib.parse.quote("line one"))
-        check("search by body", status == 200 and b"1 result(s)" in body)
+        check("search by body", status == 200 and b"1 result for" in body)
 
-        status, _, body = c.get(note_url)
+        status, _, body = c.get(note_url + "/edit")
         csrf = csrf_of(body)
         version = version_of(body)
         check("editor exposes version", version == 1, version)
@@ -230,7 +261,7 @@ def main():
 
         status, _, body = c.form(note_url, {"title": "hacked", "body": "nope"}, csrf="0" * 64, version=2)
         check("bad CSRF is rejected", status == 403, status)
-        status, _, body = c.get(note_url)
+        status, _, body = c.get(note_url + "/edit")
         check("bad CSRF made no change", b"First update" in body and b"hacked" not in body)
 
         status, _, body = c.form(note_url, {"title": "x", "body": "y"}, csrf=csrf, version="not-a-number")
@@ -264,7 +295,68 @@ def main():
         status, _, body = c.get("/notes")
         check("restored note appears again", b"First update" in body)
         status, _, body = c.get("/notes?q=" + urllib.parse.quote("First update"))
-        check("restored note is searchable again", status == 200 and b"1 result(s)" in body)
+        check("restored note is searchable again", status == 200 and b"1 result for" in body)
+
+        # Markdown rendering.
+        status, _, edit = c.get(note_url + "/edit")
+        csrf = csrf_of(edit)
+        version = version_of(edit)
+        markdown_body = "# Heading\n\n**bold** and `code`\n\n<script>alert(1)</script>"
+        status, _, _ = c.form(note_url, {"title": "First update", "body": markdown_body}, csrf=csrf, version=version)
+        check("markdown save succeeds", status == 303, status)
+        status, _, read = c.get(note_url)
+        check("markdown renders heading, emphasis, and code",
+              b"<h1>Heading</h1>" in read and b"<strong>bold</strong>" in read and b"<code>code</code>" in read)
+        check("markdown escapes raw html", b"&lt;script&gt;" in read and b"<script>alert(1)</script>" not in read)
+
+        # File upload and delivery. SVG is deliberately served as a download.
+        status, _, edit = c.get(note_url + "/edit")
+        png = b"\x89PNG\r\n\x1a\n" + b"feathernote-test-image"
+        payload, ctype = multipart_body({"csrf": csrf_of(edit)}, "pixel.png", png)
+        status, headers, _ = c.request("POST", note_url + "/files", payload, {"Content-Type": ctype})
+        check("image upload redirects to editor",
+              status == 303 and "uploaded=1" in headers.get("location", ""), f"{status} {headers}")
+        status, _, read = c.get(note_url)
+        check("uploaded image is linked in the note",
+              b"<img" in read and b"/files/" in read and b"pixel.png" in read)
+        m = re.search(rb'/files/(\d+)/pixel\.png', read)
+        check("uploaded image URL is present", m is not None)
+        if m:
+            file_path = f"/files/{int(m.group(1))}/pixel.png"
+            file_id = int(m.group(1))
+            status, headers, data = c.get(file_path)
+            check("image is served inline with a sniffed type",
+                  status == 200 and headers.get("content-type") == "image/png" and
+                  headers.get("content-disposition", "").startswith("inline") and
+                  data.startswith(b"\x89PNG"))
+            anon = Client(port)
+            status, headers, _ = anon.get(file_path)
+            check("files require a session", status == 303 and headers.get("location") == "/login")
+            _, _, edit2 = c.get(note_url + "/edit")
+            note_id = note_url.rsplit("/", 1)[-1]
+            status, headers, _ = c.form(f"/notes/{note_id}/files/{file_id}/delete", {}, csrf=csrf_of(edit2))
+            check("file delete redirects", status == 303, status)
+            status, _, _ = c.get(file_path)
+            check("deleted file is gone", status == 404, status)
+            bad_payload, bad_type = multipart_body({"csrf": "0" * 64}, "nope.png", png)
+            status, _, _ = c.request("POST", note_url + "/files", bad_payload, {"Content-Type": bad_type})
+            check("upload requires CSRF", status == 403, status)
+
+        status, _, edit = c.get(note_url + "/edit")
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>'
+        payload, ctype = multipart_body({"csrf": csrf_of(edit)}, "evil.svg", svg)
+        status, headers, _ = c.request("POST", note_url + "/files", payload, {"Content-Type": ctype})
+        check("svg upload accepted as a generic file", status == 303, status)
+        status, _, read = c.get(note_url)
+        m = re.search(rb'/files/(\d+)/evil\.svg', read)
+        if m:
+            status, headers, data = c.get(f"/files/{int(m.group(1))}/evil.svg")
+            check("svg is served as an attachment, not an image",
+                  status == 200 and headers.get("content-type") == "text/plain; charset=utf-8" and
+                  headers.get("content-disposition", "").startswith("attachment"))
+            check("svg body is preserved", b"onload" in data)
+        else:
+            check("svg attachment link rendered", False, "no /files link")
 
         status, _, _ = c.request("POST", "/notes", b"title=%FF", headers={"Content-Type": "application/x-www-form-urlencoded"})
         check("invalid UTF-8 form is rejected", status == 400, status)
@@ -279,7 +371,7 @@ def main():
         status, _, _ = c.get("/notes/999999")
         check("missing note is 404", status == 404, status)
 
-        status, headers, body = c.get(note_url)
+        status, headers, body = c.get(note_url + "/edit")
         csrf = csrf_of(body)
         status, headers, _ = c.form("/logout", {}, csrf=csrf)
         check("logout redirects and expires cookie",
@@ -313,7 +405,7 @@ def main():
         # Consistent online backup while the server is running.
         wc = Client(port)
         login(wc)
-        _, _, edit = wc.get(note_url)
+        _, _, edit = wc.get(note_url + "/edit")
         wcsrf = csrf_of(edit)
         wversion = version_of(edit)
         write_statuses = []

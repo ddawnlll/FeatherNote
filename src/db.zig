@@ -45,6 +45,21 @@ pub const Session = struct {
     csrf_token: []const u8,
 };
 
+pub const Attachment = struct {
+    id: i64,
+    note_id: i64,
+    filename: []const u8,
+    mime: []const u8,
+    size: i64,
+    sha256: []const u8,
+    created_at: i64,
+};
+
+pub const AttachmentData = struct {
+    meta: Attachment,
+    data: []const u8,
+};
+
 pub const WriteResult = enum { ok, not_found, deleted, conflict };
 
 /// Creates a consistent copy using SQLite's online backup API. Safe while a
@@ -144,7 +159,7 @@ pub const Db = struct {
             \\SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
         );
         const current = self.schemaVersion() catch return DbError.MigrationFailed;
-        if (current > 2) return DbError.VersionMismatch;
+        if (current > 3) return DbError.VersionMismatch;
         if (current == 0) {
             try self.execRaw("BEGIN IMMEDIATE;");
             errdefer _ = self.execRaw("ROLLBACK;") catch {};
@@ -157,6 +172,13 @@ pub const Db = struct {
             errdefer _ = self.execRaw("ROLLBACK;") catch {};
             try self.execRaw(assets.migration_0002);
             try self.execRaw("UPDATE schema_meta SET version = 2;");
+            try self.execRaw("COMMIT;");
+        }
+        if (current <= 2) {
+            try self.execRaw("BEGIN IMMEDIATE;");
+            errdefer _ = self.execRaw("ROLLBACK;") catch {};
+            try self.execRaw(assets.migration_0003);
+            try self.execRaw("UPDATE schema_meta SET version = 3;");
             try self.execRaw("COMMIT;");
         }
     }
@@ -198,6 +220,11 @@ pub const Db = struct {
         fn bindInt(self: *Stmt, index: c_int, value: i64) !void {
             if (c.sqlite3_bind_int64(self.handle, index, value) != c.SQLITE_OK) return error.Sqlite;
         }
+
+        fn bindBlob(self: *Stmt, index: c_int, data: []const u8) !void {
+            const rc = c.sqlite3_bind_blob(self.handle, index, data.ptr, @intCast(data.len), null);
+            if (rc != c.SQLITE_OK) return error.Sqlite;
+        }
     };
 
     fn prepare(self: *Db, sql: [:0]const u8) !Stmt {
@@ -216,6 +243,15 @@ pub const Db = struct {
         const n: usize = @intCast(c.sqlite3_column_bytes(stmt.handle, index));
         if (ptr == null) return allocator.dupe(u8, "");
         return allocator.dupe(u8, ptr[0..n]);
+    }
+
+    fn columnBlob(self: *Db, stmt: *Stmt, index: c_int, allocator: Allocator) ![]const u8 {
+        _ = self;
+        const ptr = c.sqlite3_column_blob(stmt.handle, index);
+        const n: usize = @intCast(c.sqlite3_column_bytes(stmt.handle, index));
+        if (ptr == null or n == 0) return allocator.dupe(u8, "");
+        const bytes: [*]const u8 = @ptrCast(ptr);
+        return allocator.dupe(u8, bytes[0..n]);
     }
 
     // ---- owner and sessions ----
@@ -323,6 +359,114 @@ pub const Db = struct {
         defer stmt.deinit();
         try stmt.bindText(1, token_hash);
         _ = try stmt.step();
+    }
+
+    // ---- appearance ----
+
+    pub fn theme(self: *Db, allocator: Allocator) ![]const u8 {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare("SELECT theme FROM owner WHERE id = 1");
+        defer stmt.deinit();
+        if (try stmt.step() != c.SQLITE_ROW) return allocator.dupe(u8, "feather");
+        return self.columnText(&stmt, 0, allocator);
+    }
+
+    pub fn setTheme(self: *Db, theme_id: []const u8) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare("UPDATE owner SET theme = ? WHERE id = 1");
+        defer stmt.deinit();
+        try stmt.bindText(1, theme_id);
+        _ = try stmt.step();
+    }
+
+    // ---- attachments ----
+
+    pub const NewAttachment = struct {
+        note_id: i64,
+        filename: []const u8,
+        mime: []const u8,
+        sha256: []const u8,
+        data: []const u8,
+    };
+
+    pub fn insertAttachment(self: *Db, row: NewAttachment, now: i64) !i64 {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare(
+            \\INSERT INTO attachments(note_id, filename, mime, size, sha256, data, created_at)
+            \\VALUES(?, ?, ?, ?, ?, ?, ?)
+        );
+        defer stmt.deinit();
+        try stmt.bindInt(1, row.note_id);
+        try stmt.bindText(2, row.filename);
+        try stmt.bindText(3, row.mime);
+        try stmt.bindInt(4, @intCast(row.data.len));
+        try stmt.bindText(5, row.sha256);
+        try stmt.bindBlob(6, row.data);
+        try stmt.bindInt(7, now);
+        if (try stmt.step() != c.SQLITE_DONE) return error.Sqlite;
+        return c.sqlite3_last_insert_rowid(self.handle);
+    }
+
+    pub fn attachment(self: *Db, allocator: Allocator, id: i64) !?AttachmentData {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare(
+            \\SELECT id, note_id, filename, mime, size, sha256, created_at, data
+            \\FROM attachments WHERE id = ?
+        );
+        defer stmt.deinit();
+        try stmt.bindInt(1, id);
+        if (try stmt.step() != c.SQLITE_ROW) return null;
+        return .{
+            .meta = .{
+                .id = c.sqlite3_column_int64(stmt.handle, 0),
+                .note_id = c.sqlite3_column_int64(stmt.handle, 1),
+                .filename = try self.columnText(&stmt, 2, allocator),
+                .mime = try self.columnText(&stmt, 3, allocator),
+                .size = c.sqlite3_column_int64(stmt.handle, 4),
+                .sha256 = try self.columnText(&stmt, 5, allocator),
+                .created_at = c.sqlite3_column_int64(stmt.handle, 6),
+            },
+            .data = try self.columnBlob(&stmt, 7, allocator),
+        };
+    }
+
+    pub fn attachmentsForNote(self: *Db, allocator: Allocator, note_id: i64) ![]Attachment {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare(
+            \\SELECT id, note_id, filename, mime, size, sha256, created_at
+            \\FROM attachments WHERE note_id = ? ORDER BY id ASC
+        );
+        defer stmt.deinit();
+        try stmt.bindInt(1, note_id);
+        var rows: std.ArrayList(Attachment) = .empty;
+        while (try stmt.step() == c.SQLITE_ROW) {
+            try rows.append(allocator, .{
+                .id = c.sqlite3_column_int64(stmt.handle, 0),
+                .note_id = c.sqlite3_column_int64(stmt.handle, 1),
+                .filename = try self.columnText(&stmt, 2, allocator),
+                .mime = try self.columnText(&stmt, 3, allocator),
+                .size = c.sqlite3_column_int64(stmt.handle, 4),
+                .sha256 = try self.columnText(&stmt, 5, allocator),
+                .created_at = c.sqlite3_column_int64(stmt.handle, 6),
+            });
+        }
+        return rows.toOwnedSlice(allocator);
+    }
+
+    pub fn deleteAttachment(self: *Db, id: i64, note_id: i64) !bool {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare("DELETE FROM attachments WHERE id = ? AND note_id = ?");
+        defer stmt.deinit();
+        try stmt.bindInt(1, id);
+        try stmt.bindInt(2, note_id);
+        if (try stmt.step() != c.SQLITE_DONE) return error.Sqlite;
+        return c.sqlite3_changes(self.handle) == 1;
     }
 
     // ---- notes ----
