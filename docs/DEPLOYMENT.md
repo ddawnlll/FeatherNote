@@ -77,8 +77,23 @@ systemctl --user reload feathernote-nginx.service
 | `feathernote-backup.timer` | daily consistent SQLite backup at 03:17 UTC |
 | `feathernote-acme.timer` | weekly certificate renewal check |
 
-Linger is enabled via `/var/lib/systemd/linger/quant`, so the user manager and
-enabled services start at boot without an interactive login.
+Linger is enabled via `/var/lib/systemd/linger/quant`, and all units are enabled.
+On a normal system this starts them at boot without an interactive login.
+**However, this sandbox's `systemd-logind` currently fails with status
+226/NAMESPACE**, so automatic start after a reboot is UNVERIFIED here. If the
+services are not running after a reboot, log in and run:
+
+```sh
+systemctl --user start feathernote.service feathernote-nginx.service \
+  feathernote-duckdns.timer feathernote-backup.timer feathernote-acme.timer
+```
+
+`scripts/boot-fallback.sh` (installed at `~/.local/bin/feathernote-boot`) is a
+fallback for hosts where the user manager cannot start; it prefers systemd and
+only starts unmanaged processes if necessary. Install it in a user crontab
+(`@reboot /home/quant/.local/bin/feathernote-boot`) on a host where `crontab`
+is writable. Writing `/var/spool/cron` is blocked in this sandbox, so that cron
+entry is not installed here.
 
 ## DuckDNS + Let's Encrypt
 

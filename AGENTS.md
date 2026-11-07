@@ -73,6 +73,12 @@ The nginx binary needs `cap_net_bind_service=+ep` to bind 80/443 as user
 sudo setcap cap_net_bind_service=+ep /home/quant/.local/nginx/usr/sbin/nginx
 ```
 
+Boot persistence: linger marker `/var/lib/systemd/linger/quant` and enabled user
+units are in place, but `systemd-logind` in this sandbox fails with
+226/NAMESPACE. Post-reboot auto-start is therefore UNVERIFIED; after a reboot,
+log in and run `systemctl --user start feathernote.service feathernote-nginx.service`.
+`scripts/boot-fallback.sh` is an optional crontab fallback.
+
 ## Update procedure (the important part)
 
 ```sh
