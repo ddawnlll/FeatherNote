@@ -1,0 +1,43 @@
+[Unit]
+Description=FeatherNote single-owner notes service
+Documentation=file:/opt/feathernote/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=feathernote
+Group=feathernote
+WorkingDirectory=/var/lib/feathernote
+ExecStart=/usr/local/bin/feathernote serve --db /var/lib/feathernote/feathernote.db --listen 127.0.0.1:8080 --trust-proxy
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+TimeoutStopSec=15
+
+# Hardening: the process only needs its data directory, loopback sockets and
+# ordinary system calls. A reverse proxy owns public TLS.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ReadWritePaths=/var/lib/feathernote
+StateDirectory=feathernote
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

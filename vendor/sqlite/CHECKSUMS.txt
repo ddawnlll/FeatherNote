@@ -1,0 +1,6 @@
+SQLite 3.54.1 amalgamation (2026-10-16)
+Upstream: https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip
+
+0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9  sqlite-amalgamation-3540100.zip
+0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52  sqlite3.c
+d6c84557261893439b341d2e6c35187ae3ea24fbfd843ad94616f72d89242b8c  sqlite3.h

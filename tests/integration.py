@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+"""End-to-end acceptance and adversarial tests for FeatherNote.
+
+Runs against a real compiled server process with JavaScript disabled by design
+(the client is a plain HTTP library). Requires only the Python standard library.
+
+Usage: python3 tests/integration.py [--binary zig-out/bin/feathernote]
+"""
+import argparse
+import http.client
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.parse
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PASSWORD = "correct horse battery staple"
+NOTE_TITLE = "Grüße aus Köln <script>alert('x')</script>"
+NOTE_BODY = "line one\n</textarea><script>alert(2)</script>\nTürkçe: ğüşiöç — 日本語"
+
+passed = 0
+failed = []
+
+
+def check(name, condition, detail=""):
+    global passed
+    if condition:
+        passed += 1
+        print(f"PASS {name}")
+    else:
+        failed.append(name)
+        print(f"FAIL {name} {detail}")
+
+
+def free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def wait_healthy(port, timeout=20):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+            c.request("GET", "/healthz")
+            r = c.getresponse()
+            body = r.read()
+            c.close()
+            if r.status == 200 and body == b"ok\n":
+                return True
+        except OSError:
+            time.sleep(0.05)
+    return False
+
+
+class Client:
+    def __init__(self, port):
+        self.port = port
+        self.cookies = {}
+
+    def request(self, method, path, body=None, headers=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        hdrs = dict(headers or {})
+        if body is not None and "Content-Type" not in hdrs:
+            hdrs["Content-Type"] = "application/x-www-form-urlencoded"
+        if self.cookies:
+            hdrs["Cookie"] = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
+        conn.request(method, path, body=body, headers=hdrs)
+        resp = conn.getresponse()
+        data = resp.read()
+        raw_headers = resp.getheaders()
+        for name, value in raw_headers:
+            if name.lower() == "set-cookie":
+                first = value.split(";", 1)[0]
+                if "=" in first:
+                    cname, cval = first.split("=", 1)
+                    if "max-age=0" in value.lower() or cval == "":
+                        self.cookies.pop(cname, None)
+                    else:
+                        self.cookies[cname] = cval
+        conn.close()
+        return resp.status, {k.lower(): v for k, v in raw_headers}, data
+
+    def form(self, path, fields, csrf=None, version=None):
+        data = dict(fields)
+        if csrf is not None:
+            data["csrf"] = csrf
+        if version is not None:
+            data["version"] = str(version)
+        return self.request("POST", path, urllib.parse.urlencode(data))
+
+    def get(self, path):
+        return self.request("GET", path)
+
+
+def csrf_of(html):
+    m = re.search(rb'name="csrf" value="([0-9a-f]{64})"', html)
+    return m.group(1).decode() if m else None
+
+
+def version_of(html):
+    m = re.search(rb'name="version" value="(\d+)"', html)
+    return int(m.group(1)) if m else None
+
+
+def start_server(binary, db_path, port, log_path):
+    log = open(log_path, "ab")
+    proc = subprocess.Popen(
+        [binary, "serve", "--db", db_path, "--listen", f"127.0.0.1:{port}",
+         "--insecure-cookies", "--trust-proxy"],
+        cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+    )
+    if not wait_healthy(port):
+        proc.terminate()
+        raise RuntimeError(f"server did not become healthy; log={log_path}")
+    return proc
+
+
+def stop_server(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def login(client):
+    status, headers, body = client.form("/login", {"password": PASSWORD})
+    check("login succeeds", status == 303 and headers.get("location") == "/notes", f"{status} {headers}")
+    cookie = headers.get("set-cookie", "")
+    check("session cookie is HttpOnly SameSite=Strict Path=/",
+          "HttpOnly" in cookie and "SameSite=Strict" in cookie and "Path=/" in cookie and "Domain=" not in cookie,
+          cookie)
+    check("login response is no-store", headers.get("cache-control") == "no-store")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--binary", default=os.path.join(ROOT, "zig-out", "bin", "feathernote"))
+    args = ap.parse_args()
+    binary = os.path.abspath(args.binary)
+    if not os.path.exists(binary):
+        print(f"missing binary: {binary}")
+        return 2
+
+    work = tempfile.mkdtemp(prefix="feathernote-it-", dir=os.path.join(ROOT, ".jcode-test") if os.path.isdir(os.path.join(ROOT, ".jcode-test")) else None)
+    db_path = os.path.join(work, "feather.db")
+    log_path = os.path.join(work, "server.log")
+    port = free_port()
+
+    subprocess.run([binary, "admin", "set-password", "--db", db_path],
+                   input=(PASSWORD + "\n").encode(), check=True, cwd=ROOT,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    proc = start_server(binary, db_path, port, log_path)
+    try:
+        c = Client(port)
+
+        status, headers, body = c.get("/healthz")
+        check("healthz is public", status == 200 and body == b"ok\n")
+
+        status, headers, body = c.get("/notes")
+        check("unauthenticated notes redirects to login",
+              status == 303 and headers.get("location") == "/login", f"{status}")
+
+        status, _, _ = c.form("/login", {"password": "wrong password"})
+        check("wrong password rejected", status == 401, status)
+        status, _, _ = c.form("/login", {"password": "' OR 1=1 --"})
+        check("SQL injection in login rejected", status == 401, status)
+
+        login(c)
+
+        status, headers, body = c.get("/notes")
+        check("empty note list renders", status == 200 and b"No notes yet" in body)
+        check("authenticated page is no-store", headers.get("cache-control") == "no-store")
+        check("CSP denies scripts", "default-src 'none'" in headers.get("content-security-policy", ""))
+        check("nosniff header present", headers.get("x-content-type-options") == "nosniff")
+
+        status, _, body = c.get("/notes/new")
+        csrf = csrf_of(body)
+        check("new note form has CSRF token", status == 200 and csrf is not None)
+
+        status, headers, body = c.form("/notes", {"title": NOTE_TITLE, "body": NOTE_BODY}, csrf=csrf)
+        check("create note redirects (PRG)", status == 303 and headers.get("location", "").startswith("/notes/1"), f"{status} {headers}")
+        note_url = headers.get("location").split("?")[0]
+
+        status, _, body = c.get(note_url + "?saved=1")
+        check("saved confirmation visible", status == 200 and b"Saved." in body)
+        check("script tags escaped in textarea",
+              b"<script>alert" not in body and b"&lt;script&gt;" in body and b"&lt;/textarea&gt;" in body)
+        check("UTF-8 round trip", "Grüße aus Köln".encode() in body and "日本語".encode() in body)
+
+        status, _, body = c.get("/notes")
+        check("list includes escaped title", b"Gr&uuml;" not in body and b"&lt;script&gt;" in body)
+
+        status, _, body = c.get("/notes?q=" + urllib.parse.quote("Köln"))
+        check("search by Unicode title", status == 200 and b"1 result(s)" in body)
+        status, _, body = c.get("/notes?q=" + urllib.parse.quote("<script>alert"))
+        check("search output escapes reflected query", b"&lt;script&gt;" in body and b"<script>alert" not in body)
+        status, _, body = c.get("/notes?q=" + urllib.parse.quote("' OR 1=1 --"))
+        check("SQL injection search returns no rows", status == 200 and b"No notes matched" in body)
+        status, _, body = c.get("/notes?q=" + urllib.parse.quote("line one"))
+        check("search by body", status == 200 and b"1 result(s)" in body)
+
+        status, _, body = c.get(note_url)
+        csrf = csrf_of(body)
+        version = version_of(body)
+        check("editor exposes version", version == 1, version)
+
+        status, headers, _ = c.form(note_url, {"title": "First update", "body": "version 2"}, csrf=csrf, version=version)
+        check("first save succeeds", status == 303, status)
+        status, _, body = c.form(note_url, {"title": "Stale draft", "body": "my unsaved draft"}, csrf=csrf, version=version)
+        check("stale save returns 409", status == 409, status)
+        check("conflict preserves submitted draft", b"Stale draft" in body and b"my unsaved draft" in body)
+        check("conflict shows latest stored version", b"First update" in body and b"version 2" in body)
+        status, _, body = c.get("/notes?q=" + urllib.parse.quote("version 2"))
+        check("FTS index reflects saved update", status == 200 and b"First update" in body)
+        status, _, body = c.get("/notes?q=" + urllib.parse.quote("my unsaved draft"))
+        check("unsaved conflict draft is not indexed", status == 200 and b"No notes matched" in body)
+
+        status, _, body = c.form(note_url, {"title": "hacked", "body": "nope"}, csrf="0" * 64, version=2)
+        check("bad CSRF is rejected", status == 403, status)
+        status, _, body = c.get(note_url)
+        check("bad CSRF made no change", b"First update" in body and b"hacked" not in body)
+
+        status, _, body = c.form(note_url, {"title": "x", "body": "y"}, csrf=csrf, version="not-a-number")
+        check("invalid version is 400", status == 400, status)
+
+        status, _, body = c.get(note_url)
+        csrf = csrf_of(body)
+        version = version_of(body)
+        status, headers, _ = c.form(note_url + "/pin", {}, csrf=csrf, version=version)
+        check("pin succeeds", status == 303, status)
+        status, _, body = c.get("/notes")
+        check("pinned note is marked", b"Pinned" in body)
+
+        status, _, body = c.get(note_url + "/delete")
+        check("delete confirmation page", status == 200 and b"Delete this note?" in body)
+        csrf = csrf_of(body)
+        version = version_of(body)
+        status, headers, _ = c.form(note_url + "/delete", {}, csrf=csrf, version=version)
+        check("soft delete redirects to list", status == 303 and headers.get("location") == "/notes")
+        status, headers, _ = c.get(note_url)
+        check("deleted note routes to trash", status == 303 and headers.get("location") == "/trash")
+        status, _, body = c.get("/trash")
+        check("trash lists deleted note", b"First update" in body and b"Restore" in body)
+        status, _, body = c.get("/notes?q=" + urllib.parse.quote("First update"))
+        check("deleted note is excluded from search", status == 200 and b"No notes matched" in body)
+        status, _, body = c.get("/trash")
+        csrf = csrf_of(body)
+        version = version_of(body)
+        status, headers, _ = c.form(note_url + "/restore", {}, csrf=csrf, version=version)
+        check("restore succeeds", status == 303 and headers.get("location") == "/trash")
+        status, _, body = c.get("/notes")
+        check("restored note appears again", b"First update" in body)
+        status, _, body = c.get("/notes?q=" + urllib.parse.quote("First update"))
+        check("restored note is searchable again", status == 200 and b"1 result(s)" in body)
+
+        status, _, _ = c.request("POST", "/notes", b"title=%FF", headers={"Content-Type": "application/x-www-form-urlencoded"})
+        check("invalid UTF-8 form is rejected", status == 400, status)
+
+        status, _, _ = c.request("POST", "/notes", b"x=" + b"a" * 330000,
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+        check("oversized request is 413", status == 413, status)
+
+        status, headers, _ = c.request("PUT", "/notes", b"")
+        check("disallowed method is 405", status == 405 and "allow" in headers, f"{status} {headers}")
+
+        status, _, _ = c.get("/notes/999999")
+        check("missing note is 404", status == 404, status)
+
+        status, headers, body = c.get(note_url)
+        csrf = csrf_of(body)
+        status, headers, _ = c.form("/logout", {}, csrf=csrf)
+        check("logout redirects and expires cookie",
+              status == 303 and "Max-Age=0" in headers.get("set-cookie", ""), f"{status} {headers}")
+        status, headers, _ = c.get("/notes")
+        check("logout revokes session", status == 303 and headers.get("location") == "/login")
+
+        # Restart persistence check.
+        stop_server(proc)
+        proc = start_server(binary, db_path, port, log_path)
+        c2 = Client(port)
+        login(c2)
+        status, _, body = c2.get("/notes")
+        check("note survives process restart", status == 200 and b"First update" in body)
+
+        # Consistent online backup while the server is running.
+        wc = Client(port)
+        login(wc)
+        _, _, edit = wc.get(note_url)
+        wcsrf = csrf_of(edit)
+        wversion = version_of(edit)
+        write_statuses = []
+
+        def writer():
+            nonlocal wversion
+            for i in range(40):
+                status, _, _ = wc.form(note_url, {"title": f"Concurrent {i}", "body": f"write {i}"},
+                                       csrf=wcsrf, version=wversion)
+                write_statuses.append(status)
+                if status == 303:
+                    wversion += 1
+                time.sleep(0.002)
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        time.sleep(0.02)
+        backup_path = os.path.join(work, "backup.db")
+        result = subprocess.run([binary, "admin", "backup", "--db", db_path, "--out", backup_path],
+                                cwd=ROOT, capture_output=True, text=True)
+        thread.join()
+        check("online backup succeeds and passes integrity_check",
+              result.returncode == 0 and "integrity_check = ok" in (result.stdout + result.stderr),
+              result.stderr)
+        check("concurrent saves all committed during backup",
+              len(write_statuses) == 40 and all(s == 303 for s in write_statuses), write_statuses[:5])
+
+        restore_dir = os.path.join(work, "restored")
+        os.makedirs(restore_dir, exist_ok=True)
+        restored_db = os.path.join(restore_dir, "feather.db")
+        shutil.copyfile(backup_path, restored_db)
+        restore_port = free_port()
+        restore_log = os.path.join(restore_dir, "server.log")
+        restore_proc = start_server(binary, restored_db, restore_port, restore_log)
+        try:
+            rc = Client(restore_port)
+            login(rc)
+            status, _, body = rc.get("/notes")
+            check("restored backup serves original data",
+                  status == 200 and (b"First update" in body or b"Concurrent " in body))
+        finally:
+            stop_server(restore_proc)
+
+        # No sensitive material in logs.
+        log_text = open(log_path, "rb").read()
+        check("password absent from logs", PASSWORD.encode() not in log_text)
+        check("note body absent from logs", "my unsaved draft".encode() not in log_text)
+
+    finally:
+        stop_server(proc)
+
+    print(f"\n{passed} passed, {len(failed)} failed")
+    if failed:
+        print("Failed: " + ", ".join(failed))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
