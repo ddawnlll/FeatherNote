@@ -1,0 +1,16 @@
+[Unit]
+Description=FeatherNote notes service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/quant/FeatherNote
+ExecStart=/home/quant/.local/bin/feathernote serve --db /home/quant/feathernote-data/feathernote.db --listen 127.0.0.1:8080 --trust-proxy
+Restart=always
+RestartSec=2
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

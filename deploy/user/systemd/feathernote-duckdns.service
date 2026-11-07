@@ -1,0 +1,8 @@
+[Unit]
+Description=Update DuckDNS record
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/quant/.local/bin/feathernote-duckdns-update

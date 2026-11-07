@@ -1,0 +1,8 @@
+[Unit]
+Description=Renew FeatherNote Let's Encrypt certificate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/quant/.local/bin/feathernote-acme-renew

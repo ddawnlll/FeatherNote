@@ -1,0 +1,8 @@
+[Unit]
+Description=Daily FeatherNote SQLite backup
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=FEATHERNOTE_BIN=/home/quant/.local/bin/feathernote
+ExecStart=/home/quant/FeatherNote/scripts/backup.sh /home/quant/feathernote-data/feathernote.db /home/quant/feathernote-backups

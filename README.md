@@ -4,6 +4,18 @@ A single-owner, self-hosted note service: one Zig process, one SQLite file, serv
 
 **Status:** P0 implementation complete and locally verified. Performance figures below are measured on the build machine identified in `reports/benchmarks.md`; they are not universal claims.
 
+## Current public installation
+
+This host is serving FeatherNote through nginx:
+
+- nginx listens on `0.0.0.0:80` and `0.0.0.0:443`; the Zig app remains on `127.0.0.1:8080`.
+- Both run as **systemd user services** with linger enabled, so they start at boot.
+- Public IP: `https://212.108.82.243/` with a self-signed certificate until DuckDNS/Let's Encrypt is configured.
+- Initial owner password: `/home/quant/feathernote-data/INITIAL_PASSWORD.txt` (mode 600). Change it after first login.
+- DuckDNS setup: `/home/quant/.local/bin/feathernote-configure-duckdns SUBDOMAIN TOKEN`.
+- Full paths, update procedure, timers and troubleshooting: **`docs/DEPLOYMENT.md`**.
+- Agent/operator instructions: **`AGENTS.md`**.
+
 ## What works
 
 - Owner bootstrap from a local admin command; no public registration and no default password.

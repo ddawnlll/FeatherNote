@@ -1,0 +1,17 @@
+[Unit]
+Description=FeatherNote TLS reverse proxy (nginx, user-space prefix)
+After=network-online.target feathernote.service
+Wants=network-online.target feathernote.service
+
+[Service]
+Type=simple
+ExecStartPre=/home/quant/.local/nginx/usr/sbin/nginx -t -p /home/quant/.local/nginx -c etc/nginx/nginx.conf
+ExecStart=/home/quant/.local/nginx/usr/sbin/nginx -p /home/quant/.local/nginx -c etc/nginx/nginx.conf -g "daemon off;"
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=2
+KillSignal=SIGQUIT
+UMask=0027
+
+[Install]
+WantedBy=default.target
