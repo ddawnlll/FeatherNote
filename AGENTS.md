@@ -45,14 +45,15 @@ enabled. Do not try to `apt install` system-wide or write `/etc/systemd/system`.
 | nginx binary | `/home/quant/local/nginx/usr/sbin/nginx` (extracted from the Debian package) |
 | nginx config | `/home/quant/local/nginx/etc/nginx/nginx.conf` and `/home/quant/local/nginx/conf.d/` |
 | Self-signed default cert | `/home/quant/local/nginx/ssl/selfsigned.{crt,key}` |
-| Let's Encrypt cert | `/home/quant/local/nginx/ssl/fullchain.pem`, `privkey.pem` |
+| Let's Encrypt cert | `/home/quant/local/nginx/ssl/fullchain.pem`, `privkey.pem` (dawnll.duckdns.org, ECC) |
 | User units | `/home/quant/.config/systemd/user/` |
-| DuckDNS config | `/home/quant/.config/feathernote/duckdns.env` (mode 600) |
-| acme.sh | `/home/quant/.local/bin/acme.sh`, home `/home/quant/.acme.sh` |
+| DuckDNS config | `/home/quant/.config/feathernote/duckdns.env` (mode 600, dawnll.duckdns.org) |
+| acme.sh | wrapper `/home/quant/.local/bin/acme.sh` -> `/home/quant/local/opt/acme-sh/acme.sh` (full tree, for `dnsapi/`), home `/home/quant/.acme.sh` |
 
 Ports: nginx on `0.0.0.0:8443` (IPv4 and IPv6); FeatherNote on
-`127.0.0.1:8080`. Public URL: `https://212.108.82.243:8443/`. Never expose
-8080 publicly.
+`127.0.0.1:8080`. Public URL: `https://dawnll.duckdns.org:8443/` (valid
+Let's Encrypt certificate); `https://212.108.82.243:8443/` still serves a
+self-signed default cert. Never expose 8080 publicly.
 
 ## Services
 
@@ -65,8 +66,10 @@ journalctl --user -u feathernote.service -n 100 --no-pager
 ```
 
 Units: `feathernote.service`, `feathernote-nginx.service`,
-`feathernote-backup.{service,timer}`. The DuckDNS and acme units are only
-installed once a domain is configured.
+`feathernote-backup.{service,timer}`, `feathernote-duckdns.{service,timer}`,
+`feathernote-acme.{service,timer}`. The DuckDNS timer refreshes the A record
+every 5 minutes; the acme timer renews and reloads nginx when the certificate
+window opens (next renewal 2027-01-08T06:00:59Z).
 
 Ports 80/443 cannot be bound as user `quant` here (`net.ipv4.ip_unprivileged_port_start`
 is 1024, `sudo` requires a password, and `~/.local` is root-owned), so nginx
@@ -75,12 +78,15 @@ adjusting `deploy/user/nginx/conf.d/site.conf`, starting nginx as root or
 applying `setcap cap_net_bind_service=+ep` to the nginx binary, and restoring an
 HTTP-to-HTTPS listener on port 80.
 
+Reinstall acme.sh with `scripts/install-acme.sh` if `~/.local/bin/acme.sh` or
+`~/local/opt/acme-sh/dnsapi` is missing.
+
 Boot persistence: linger marker `/var/lib/systemd/linger/quant` exists and all
 units are `enabled`. `systemd-logind` in this sandbox reports `State=closing`
 and previously failed with 226/NAMESPACE, so post-reboot auto-start is
 UNVERIFIED. After a reboot, log in and run
 `systemctl --user start feathernote.service feathernote-nginx.service` if the
-public URL is down. The user crontab is not writable here, so
+public URL is down; the timers start with the user manager. The user crontab is not writable here, so
 `scripts/boot-fallback.sh` cannot be installed as an `@reboot` job.
 
 ## Update procedure (the important part)

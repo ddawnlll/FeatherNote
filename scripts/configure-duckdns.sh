@@ -2,17 +2,29 @@
 # Configure DuckDNS and a Let's Encrypt certificate using the DuckDNS DNS-01
 # challenge. No root and no inbound port 80 are required for issuance.
 #
-# Usage: scripts/configure-duckdns.sh SUBDOMAIN TOKEN
+# Usage: scripts/configure-duckdns.sh SUBDOMAIN [TOKEN]
+# With no TOKEN, reads one line from stdin, or prompts if stdin is a terminal.
 # Example: scripts/configure-duckdns.sh mynotes 12345678-1234-1234-1234-123456789abc
 set -euo pipefail
 
-if [ "$#" -ne 2 ]; then
-    echo "usage: $0 SUBDOMAIN_OR_FULL_DOMAIN DUCKDNS_TOKEN" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+    echo "usage: $0 SUBDOMAIN_OR_FULL_DOMAIN [DUCKDNS_TOKEN]" >&2
     exit 2
 fi
 
 RAW_DOMAIN="$1"
-TOKEN="$2"
+if [ "$#" -eq 2 ]; then
+    TOKEN="$2"
+elif [ -t 0 ]; then
+    read -rsp 'DuckDNS token: ' TOKEN
+    echo >&2
+else
+    IFS= read -r TOKEN
+fi
+if [ -z "$TOKEN" ]; then
+    echo "DuckDNS token is required" >&2
+    exit 2
+fi
 SUBDOMAIN="${RAW_DOMAIN%.duckdns.org}"
 DOMAIN="$SUBDOMAIN.duckdns.org"
 HOME_DIR="${HOME:-/home/quant}"
@@ -49,10 +61,13 @@ echo "Requesting certificate for $DOMAIN via DuckDNS DNS-01..."
 export DuckDNS_Token="$TOKEN"
 export DuckDNS_Subdomain="$SUBDOMAIN"
 "$ACME" --home "$ACME_HOME" --config-home "$ACME_HOME" \
-    --issue --dns dns_duckdns -d "$DOMAIN" \
+    --issue --dns dns_duckdns -d "$DOMAIN" --force \
     --server https://acme-v02.api.letsencrypt.org/directory
 
 ACME_DIR="$ACME_HOME/$DOMAIN"
+if [ ! -d "$ACME_DIR" ]; then
+    ACME_DIR="$ACME_HOME/${DOMAIN}_ecc"
+fi
 install -m 0644 "$ACME_DIR/fullchain.cer" "$NGINX_PREFIX/ssl/fullchain.pem"
 install -m 0600 "$ACME_DIR/$DOMAIN.key" "$NGINX_PREFIX/ssl/privkey.pem"
 

@@ -18,6 +18,9 @@ ACME="$HOME/.local/bin/acme.sh"
 ACME_HOME="$HOME/.acme.sh"
 NGINX_PREFIX="$HOME/local/nginx"
 ACME_DIR="$ACME_HOME/$DOMAIN"
+if [ ! -d "$ACME_DIR" ]; then
+    ACME_DIR="$ACME_HOME/${DOMAIN}_ecc"
+fi
 
 if [ ! -d "$ACME_DIR" ]; then
     exit 0
