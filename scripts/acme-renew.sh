@@ -16,7 +16,7 @@ fi
 DOMAIN="${DUCKDNS_DOMAIN%.duckdns.org}.duckdns.org"
 ACME="$HOME/.local/bin/acme.sh"
 ACME_HOME="$HOME/.acme.sh"
-NGINX_PREFIX="$HOME/.local/nginx"
+NGINX_PREFIX="$HOME/local/nginx"
 ACME_DIR="$ACME_HOME/$DOMAIN"
 
 if [ ! -d "$ACME_DIR" ]; then

@@ -41,17 +41,18 @@ enabled. Do not try to `apt install` system-wide or write `/etc/systemd/system`.
 | Database | `/home/quant/feathernote-data/feathernote.db` |
 | Initial owner password | `/home/quant/feathernote-data/INITIAL_PASSWORD.txt` (mode 600) |
 | Backups | `/home/quant/feathernote-backups/{daily,weekly}` |
-| nginx prefix | `/home/quant/.local/nginx` |
-| nginx binary | `/home/quant/.local/nginx/usr/sbin/nginx` (has `cap_net_bind_service`) |
-| nginx config | `/home/quant/.local/nginx/etc/nginx/nginx.conf` and `conf.d/` |
-| Self-signed default cert | `/home/quant/.local/nginx/ssl/selfsigned.{crt,key}` |
-| Let's Encrypt cert | `/home/quant/.local/nginx/ssl/fullchain.pem`, `privkey.pem` |
+| nginx prefix | `/home/quant/local/nginx` (`~/.local` is root-owned here) |
+| nginx binary | `/home/quant/local/nginx/usr/sbin/nginx` (extracted from the Debian package) |
+| nginx config | `/home/quant/local/nginx/etc/nginx/nginx.conf` and `/home/quant/local/nginx/conf.d/` |
+| Self-signed default cert | `/home/quant/local/nginx/ssl/selfsigned.{crt,key}` |
+| Let's Encrypt cert | `/home/quant/local/nginx/ssl/fullchain.pem`, `privkey.pem` |
 | User units | `/home/quant/.config/systemd/user/` |
 | DuckDNS config | `/home/quant/.config/feathernote/duckdns.env` (mode 600) |
 | acme.sh | `/home/quant/.local/bin/acme.sh`, home `/home/quant/.acme.sh` |
 
-Ports: nginx on `0.0.0.0:80` and `0.0.0.0:443`; FeatherNote on
-`127.0.0.1:8080`. Never expose 8080 publicly.
+Ports: nginx on `0.0.0.0:8443` (IPv4 and IPv6); FeatherNote on
+`127.0.0.1:8080`. Public URL: `https://212.108.82.243:8443/`. Never expose
+8080 publicly.
 
 ## Services
 
@@ -64,21 +65,23 @@ journalctl --user -u feathernote.service -n 100 --no-pager
 ```
 
 Units: `feathernote.service`, `feathernote-nginx.service`,
-`feathernote-duckdns.{service,timer}`, `feathernote-backup.{service,timer}`,
-`feathernote-acme.{service,timer}`.
+`feathernote-backup.{service,timer}`. The DuckDNS and acme units are only
+installed once a domain is configured.
 
-The nginx binary needs `cap_net_bind_service=+ep` to bind 80/443 as user
-`quant`. Re-apply after replacing that nginx binary:
+Ports 80/443 cannot be bound as user `quant` here (`net.ipv4.ip_unprivileged_port_start`
+is 1024, `sudo` requires a password, and `~/.local` is root-owned), so nginx
+listens on **8443**. If a root shell becomes available, bind **443** by
+adjusting `deploy/user/nginx/conf.d/site.conf`, starting nginx as root or
+applying `setcap cap_net_bind_service=+ep` to the nginx binary, and restoring an
+HTTP-to-HTTPS listener on port 80.
 
-```sh
-sudo setcap cap_net_bind_service=+ep /home/quant/.local/nginx/usr/sbin/nginx
-```
-
-Boot persistence: linger marker `/var/lib/systemd/linger/quant` and enabled user
-units are in place, but `systemd-logind` in this sandbox fails with
-226/NAMESPACE. Post-reboot auto-start is therefore UNVERIFIED; after a reboot,
-log in and run `systemctl --user start feathernote.service feathernote-nginx.service`.
-`scripts/boot-fallback.sh` is an optional crontab fallback.
+Boot persistence: linger marker `/var/lib/systemd/linger/quant` exists and all
+units are `enabled`. `systemd-logind` in this sandbox reports `State=closing`
+and previously failed with 226/NAMESPACE, so post-reboot auto-start is
+UNVERIFIED. After a reboot, log in and run
+`systemctl --user start feathernote.service feathernote-nginx.service` if the
+public URL is down. The user crontab is not writable here, so
+`scripts/boot-fallback.sh` cannot be installed as an `@reboot` job.
 
 ## Update procedure (the important part)
 
@@ -97,7 +100,9 @@ curl -fsS http://127.0.0.1:8080/healthz
 ```
 
 If nginx config under `deploy/user/nginx/` changed, also copy it into
-`/home/quant/.local/nginx/etc/nginx/` and run `nginx -t` before reloading.
+`/home/quant/local/nginx/etc/nginx/` and `/home/quant/local/nginx/conf.d/`, then
+run `nginx -t` before reloading. Remove any stale `00-http.conf`: nginx no
+longer listens on port 80.
 
 Never delete `/home/quant/feathernote-data` during an update. Take a backup
 first if a migration is involved:

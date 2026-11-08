@@ -28,7 +28,7 @@ done
 if timeout 10 systemctl --user is-system-running >/dev/null 2>&1; then
     timeout 20 systemctl --user start \
         feathernote.service feathernote-nginx.service \
-        feathernote-duckdns.timer feathernote-backup.timer feathernote-acme.timer \
+        feathernote-backup.timer \
         >>"$LOG" 2>&1 || true
     if timeout 5 systemctl --user is-active --quiet feathernote.service && \
        timeout 5 systemctl --user is-active --quiet feathernote-nginx.service; then
@@ -45,7 +45,7 @@ if ! pgrep -f "$HOME/.local/bin/feathernote serve" >/dev/null 2>&1; then
     log "started fallback feathernote supervisor"
 fi
 
-if ! pgrep -f "$HOME/.local/nginx/usr/sbin/nginx -p" >/dev/null 2>&1; then
-    "$HOME/.local/nginx/usr/sbin/nginx" -p "$HOME/.local/nginx" -c etc/nginx/nginx.conf >>"$LOG" 2>&1 || true
+if ! pgrep -f "$HOME/local/nginx/usr/sbin/nginx -p" >/dev/null 2>&1; then
+    "$HOME/local/nginx/usr/sbin/nginx" -p "$HOME/local/nginx" -c etc/nginx/nginx.conf >>"$LOG" 2>&1 || true
     log "started fallback nginx"
 fi

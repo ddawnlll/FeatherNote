@@ -16,7 +16,7 @@ TOKEN="$2"
 SUBDOMAIN="${RAW_DOMAIN%.duckdns.org}"
 DOMAIN="$SUBDOMAIN.duckdns.org"
 HOME_DIR="${HOME:-/home/quant}"
-NGINX_PREFIX="$HOME_DIR/.local/nginx"
+NGINX_PREFIX="$HOME_DIR/local/nginx"
 ENV_DIR="$HOME_DIR/.config/feathernote"
 ENV_FILE="$ENV_DIR/duckdns.env"
 ACME="$HOME_DIR/.local/bin/acme.sh"
@@ -58,8 +58,8 @@ install -m 0600 "$ACME_DIR/$DOMAIN.key" "$NGINX_PREFIX/ssl/privkey.pem"
 
 cat > "$NGINX_PREFIX/etc/nginx/conf.d/duckdns.conf" <<EOF
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
+    listen 8443 ssl;
+    listen [::]:8443 ssl;
     http2 on;
     server_name $DOMAIN;
 
@@ -75,8 +75,9 @@ server {
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
-        proxy_set_header Host \$host;
+        proxy_set_header Host \$host:\$server_port;
         proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header Connection "";
         proxy_read_timeout 30s;
