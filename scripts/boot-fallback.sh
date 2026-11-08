@@ -8,8 +8,8 @@ HOME=/home/quant
 export HOME
 export XDG_RUNTIME_DIR=/run/user/1000
 export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
-LOG="$HOME/.local/state/feathernote-boot.log"
-mkdir -p "$HOME/.local/state"
+LOG="$HOME/local/state/feathernote-boot.log"
+mkdir -p "$HOME/local/state"
 
 log() {
     printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG"
