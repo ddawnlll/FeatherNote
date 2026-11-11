@@ -4,7 +4,6 @@
 No network access, no server, no production database. Requires Goose on PATH.
 The reference mirrors src/http_util.zig::escapeHtml (not Python html.escape).
 """
-import os
 import pathlib
 import random
 import shutil
