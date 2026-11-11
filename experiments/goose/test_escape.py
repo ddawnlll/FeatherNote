@@ -39,13 +39,13 @@ def main() -> int:
 
         cases = [
             b"", b"hello", b"&<>\\\"'", b"&&&&", b"<script>alert(1)</script>",
-            b"</textarea> \"x\" 'y' &amp;", b"newline\\nline2\\r\\n", b"zero\\x00byte",
+            b"</textarea> \"x\" 'y' &amp;", b"newline\nline2\r\n", b"zero\x00byte",
             "Grüße aus Köln — 日本語 🪶".encode("utf-8"),
             (b"nothing-to-escape " * 8192),
             (b"<&'\"x>" * 32768),
         ]
         rng = random.Random(20261111)
-        alphabet = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<>&\"' /\\n\\r\\t"
+        alphabet = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<>&\"' /\n\r\t"
         for _ in range(64):
             size = rng.randrange(0, 8192)
             cases.append(bytes(alphabet[rng.randrange(len(alphabet))] for _ in range(size)))
