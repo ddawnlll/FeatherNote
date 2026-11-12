@@ -345,6 +345,20 @@ def main():
         status, _, edit2 = c.get(note_url + "/edit")
         check("source body unchanged by renders", b"Katsayi" in edit2 and b"[^1]: Footnote content" in edit2 and b"- [x] done" in edit2)
 
+        # A table directly after a list with no blank line still renders
+        # (GFM would swallow it as list text; the renderer inserts the
+        # separator), and the stored source is not rewritten.
+        status, _, edit_glued = c.get(note_url + "/edit")
+        glued_body = "- one item\n- two items\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+        status, _, _ = c.form(note_url, {"title": "First update", "body": glued_body},
+                              csrf=csrf_of(edit_glued), version=version_of(edit_glued))
+        check("glued table save succeeds", status == 303, status)
+        status, _, read_glued = c.get(note_url)
+        check("table after list without blank line renders",
+              b"<table" in read_glued and b"<tbody" in read_glued and b"| A |" not in read_glued)
+        status, _, edit_glued2 = c.get(note_url + "/edit")
+        check("glued table source not rewritten", edit_glued2.count(b"- one item") == 1 and b"| A | B |" in edit_glued2)
+
         # Adversarial stored-XSS fixtures through the full save/render path.
         status, _, edit = c.get(note_url + "/edit")
         xss_body = ("<svg onload=alert(1)>\n\n<img src=x onerror=alert(1)>\n\n"

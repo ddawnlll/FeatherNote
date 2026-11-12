@@ -16,6 +16,7 @@ sanitizer. See `docs/DECISIONS.md` D019 for the rationale and security model.
 | Ordered/unordered lists, deeply nested, ordered start number | yes |
 | Task lists `- [x]` / `- [ ]` | yes, rendered as disabled checkboxes |
 | Tables with alignment | yes, responsive scroll region on narrow screens |
+| Table directly after a list/paragraph (no blank line) | renders: the renderer inserts the missing blank line at read time (stored Markdown unchanged) |
 | Links: inline, reference, autolinks (URL, www, email) | yes |
 | Images | same-origin paths only (`/files/...`), refuses remote URLs |
 | Horizontal rules | yes |

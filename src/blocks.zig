@@ -281,10 +281,12 @@ pub fn parseBlocks(alloc: Allocator, body: []const u8) ![]Block {
             continue;
         }
         if (listMarker(first.text) != null) {
-            // A list runs until a blank line, except that blank-looking
-            // `>`-less continuation lines stay attached (lazy continuation).
+            // A list runs until a blank line, except that a table start ends
+            // it even without a blank separator, so the block editor splits
+            // the table out instead of swallowing it as lazy continuation.
             var j = idx;
             while (j + 1 < lines.len and !isBlank(lines[j + 1])) : (j += 1) {
+                if (containsPipe(lines[j + 1].text) and j + 2 < lines.len and isTableDelimiter(lines[j + 2].text)) break;
                 end_idx = j + 1;
             }
             block.end = lines[end_idx].end;
@@ -780,6 +782,15 @@ test "table cells keep escaped and code pipes" {
     try std.testing.expectEqual(@as(usize, 2), table.cols);
     try std.testing.expectEqualStrings("a\\|b", table.header[0]);
     try std.testing.expectEqualStrings("`c|d`", table.header[1]);
+}
+
+test "a table directly after a list splits into two blocks" {
+    const alloc = std.testing.allocator;
+    const body = "- one\n- two\n| A | B |\n| --- | --- |\n| 1 | 2 |\n";
+    const bs = try parseBlocks(alloc, body);
+    try std.testing.expectEqual(@as(usize, 2), bs.len);
+    try std.testing.expectEqual(Kind.list_unordered, bs[0].kind);
+    try std.testing.expectEqual(Kind.table, bs[1].kind);
 }
 
 test "table row addition regenerates a wider table" {
