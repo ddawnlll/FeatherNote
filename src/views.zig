@@ -2,6 +2,7 @@
 const std = @import("std");
 const util = @import("http_util.zig");
 const db = @import("db.zig");
+const blocks = @import("blocks.zig");
 const markdown = @import("markdown.zig");
 const themes = @import("themes.zig");
 
@@ -247,7 +248,9 @@ pub fn readNote(
     try util.escapeHtml(w, displayTitle(note.title));
     try w.writeAll("</h1><div class=\"tabs\"><span class=\"tab active\">Read</span><a class=\"tab\" href=\"/notes/");
     try w.print("{d}/edit", .{note.id});
-    try w.writeAll("\">Edit</a></div></header>\n");
+    try w.writeAll("\">Edit</a><a class=\"tab\" href=\"/notes/");
+    try w.print("{d}/blocks", .{note.id});
+    try w.writeAll("\">Blocks</a></div></header>\n");
     if (saved) try statusMessage(w, "Saved.");
     try w.writeAll("<div class=\"prose\">");
     if (note.body.len == 0) {
@@ -307,6 +310,7 @@ pub const EditorArgs = struct {
     draft_title: []const u8 = "",
     draft_body: []const u8 = "",
     error_message: ?[]const u8 = null,
+    preview_html: ?[]const u8 = null,
 };
 
 pub fn editor(w: *Writer, ctx: Ctx, args: EditorArgs) !void {
@@ -334,15 +338,18 @@ pub fn editor(w: *Writer, ctx: Ctx, args: EditorArgs) !void {
     if (!is_new) {
         try w.writeAll("<div class=\"tabs\"><span class=\"tab active\">Write</span><a class=\"tab\" href=\"/notes/");
         try w.print("{d}", .{args.note.?.id});
-        try w.writeAll("\">Read</a></div>");
+        try w.writeAll("\">Read</a><a class=\"tab\" href=\"/notes/");
+        try w.print("{d}/blocks", .{args.note.?.id});
+        try w.writeAll("\">Blocks</a></div>");
     }
     try w.writeAll("</header>\n");
     if (args.saved) try statusMessage(w, "Saved.");
     if (args.notice) |message| try statusMessage(w, message);
     if (args.error_message) |message| try errorBanner(w, message);
 
-    const value_title = if (args.error_message != null or is_new) args.draft_title else args.note.?.title;
-    const value_body = if (args.error_message != null or is_new) args.draft_body else args.note.?.body;
+    const showing_draft = args.error_message != null or is_new or args.preview_html != null;
+    const value_title = if (showing_draft) args.draft_title else args.note.?.title;
+    const value_body = if (showing_draft) args.draft_body else args.note.?.body;
 
     try w.writeAll("<form class=\"editor-form\" method=\"post\" action=\"");
     if (is_new) {
@@ -358,16 +365,27 @@ pub fn editor(w: *Writer, ctx: Ctx, args: EditorArgs) !void {
     try w.writeAll("\" autocomplete=\"off\" placeholder=\"A clear title\">");
     try w.writeAll("<label for=\"body\">Note</label><textarea id=\"body\" name=\"body\" rows=\"18\" spellcheck=\"true\" placeholder=\"Write in Markdown. # heading, **bold**, - list, [link](https://…), ![image](/files/…)\">");
     try util.escapeHtml(w, value_body);
-    try w.writeAll("</textarea><div class=\"actions\"><button type=\"submit\" class=\"primary\">Save note</button><a class=\"button secondary\" href=\"");
+    try w.writeAll("</textarea><div class=\"actions\"><button type=\"submit\" class=\"primary\">Save note</button><button type=\"submit\" class=\"secondary\" formaction=\"");
+    if (is_new) {
+        try w.writeAll("/notes/preview");
+    } else {
+        try w.print("/notes/{d}/preview", .{args.note.?.id});
+    }
+    try w.writeAll("\">Preview draft</button><a class=\"button secondary\" href=\"");
     if (is_new) {
         try w.writeAll("/notes");
     } else {
         try w.print("/notes/{d}", .{args.note.?.id});
     }
-    try w.writeAll("\">Cancel</a></div></form>\n");
+    try w.writeAll("\">Cancel</a></div><p class=\"muted small\">Preview renders your current, unsaved draft on the server and saves nothing.</p></form>\n");
+    if (args.preview_html) |html| {
+        try w.writeAll("<section class=\"preview\"><h2>Preview (unsaved)</h2><p class=\"muted small\">Rendered from your current draft. Nothing was saved.</p><div class=\"prose\">");
+        try w.writeAll(html);
+        try w.writeAll("</div></section>\n");
+    }
     if (is_new) try w.writeAll("<p class=\"muted small\">Save once to attach files. Images are uploaded, not pasted, because paste needs JavaScript.</p>\n");
 
-    try w.writeAll("<details class=\"help\"><summary>Markdown cheatsheet</summary><pre># Heading\n**bold** *italic* ~~strike~~\n`inline code`\n- list item\n1. ordered item\n> quote\n[link](https://example.com)\n![alt](/files/ID/name.png)\n```zig\ncode block\n```</pre><p class=\"muted small\">Raw HTML in an allowlisted subset is kept after sanitization; scripts, handlers, and dangerous URLs never render. Links allow http, https, mailto, and same-site paths. Images must use a same-site path such as /files/.</p></details>\n");
+    try w.writeAll("<details class=\"help\"><summary>Markdown cheatsheet</summary><pre># Heading and ### Subheading\n**bold** *italic* ~~strike~~ `inline code`\n- list item\n1. ordered item\n- [ ] checklist task\n- [x] finished task\n> quote\n[link](https://example.com) and ![alt](/files/ID/name.png)\n```zig\ncode block\n```\n\n| Column | Column |\n| --- | ---: |\n| cell | cell |\n\nFootnote[^1].\n\n[^1]: Footnote text\n\n---\n\n&lt;details&gt;&lt;summary&gt;Raw HTML subset&lt;/summary&gt;safe markup&lt;/details&gt;</pre><p class=\"muted small\">Raw HTML in an allowlisted subset is kept after sanitization; scripts, handlers, and dangerous URLs never render. Links allow http, https, mailto, and same-site paths. Images must use a same-site path such as /files/. Copy any example above into the note; there are no buttons to click.</p></details>\n");
 
     if (!is_new) {
         try w.writeAll("<section class=\"upload\"><h2 class=\"rail-title\">Add a file</h2>");
@@ -534,6 +552,289 @@ pub fn settings(w: *Writer, ctx: Ctx, saved: bool) !void {
     try w.writeAll("</div><div class=\"actions\"><button type=\"submit\" class=\"primary\">Apply theme</button></div></form>\n");
     try w.writeAll("<p class=\"muted small\">The choice lives in the owner row, so backups carry it too.</p>\n");
     try documentEnd(w);
+}
+
+pub const BlocksArgs = struct {
+    note: db.Note,
+    alloc: std.mem.Allocator,
+    parsed: []blocks.Block,
+    body: []const u8,
+    sidebar_rows: []const db.NoteRow,
+    confirm: ?usize = null,
+    notice: ?[]const u8 = null,
+    error_message: ?[]const u8 = null,
+    draft_title: []const u8 = "",
+};
+
+fn kindOptions(w: *Writer, selected: blocks.Kind) !void {
+    const kinds = [_]blocks.Kind{ .paragraph, .heading, .list_unordered, .list_ordered, .list_task, .quote, .code, .hr, .link, .image, .table, .raw };
+    for (kinds) |k| {
+        try w.writeAll("<option value=\"");
+        try w.writeAll(kindValue(k));
+        try w.writeAll("\"");
+        if (k == selected) try w.writeAll(" selected");
+        try w.writeAll(">");
+        try w.writeAll(blocks.kindName(k));
+        try w.writeAll("</option>");
+    }
+}
+
+fn kindValue(kind: blocks.Kind) []const u8 {
+    return switch (kind) {
+        .paragraph => "paragraph",
+        .heading => "heading",
+        .list_unordered => "list_unordered",
+        .list_ordered => "list_ordered",
+        .list_task => "list_task",
+        .quote => "quote",
+        .code => "code",
+        .table => "table",
+        .hr => "hr",
+        .link => "link",
+        .image => "image",
+        .raw => "raw",
+    };
+}
+
+pub fn blockEditor(w: *Writer, ctx: Ctx, args: BlocksArgs) !void {
+    const note = args.note;
+    try documentStart(w, displayTitle(note.title), ctx, null);
+    try w.writeAll("<div class=\"sheet\"><aside class=\"rail\"><dl class=\"meta-list\"><dt>Updated</dt><dd>");
+    try util.formatDateFull(w, note.updated_at);
+    try w.writeAll("</dd><dt>Version</dt><dd>");
+    try w.print("{d}", .{note.version});
+    try w.writeAll("</dd></dl>");
+    try recentRail(w, args.sidebar_rows, note.id);
+    try w.writeAll("</aside><div class=\"sheet-main\"><header class=\"sheet-head\"><h1>");
+    try util.escapeHtml(w, displayTitle(note.title));
+    try w.writeAll("</h1><div class=\"tabs\"><a class=\"tab\" href=\"/notes/");
+    try w.print("{d}", .{note.id});
+    try w.writeAll("\">Read</a><a class=\"tab\" href=\"/notes/");
+    try w.print("{d}/edit", .{note.id});
+    try w.writeAll("\">Write</a><span class=\"tab active\">Blocks</span></div></header>\n");
+    if (args.notice) |message| try statusMessage(w, message);
+    if (args.error_message) |message| try errorBanner(w, message);
+    try w.writeAll("<p class=\"muted small\">Each block below edits its own Markdown on the server. Unchanged blocks keep their exact bytes; nothing is reformatted elsewhere in the note. There is no live cursor tracking: submit a block form, then keep editing. Raw blocks are the lossless source fallback for constructs this editor cannot regenerate safely (nested lists, reference definitions, indented code, HTML blocks).</p>\n");
+    // Title form.
+    try w.writeAll("<form method=\"post\" action=\"/notes/");
+    try w.print("{d}/blocks/title", .{note.id});
+    try w.writeAll("\">");
+    try csrfField(w, ctx.csrf);
+    try versionField(w, note.version);
+    try w.writeAll("<label for=\"block-title\">Title</label><input id=\"block-title\" name=\"title\" type=\"text\" maxlength=\"200\" value=\"");
+    try util.escapeHtml(w, if (args.error_message != null or args.draft_title.len > 0) args.draft_title else note.title);
+    try w.writeAll("\"><div class=\"actions\"><button type=\"submit\" class=\"primary\">Save title</button></div></form>\n");
+    // Add-block form (top).
+    try w.writeAll("<form method=\"post\" action=\"/notes/");
+    try w.print("{d}/blocks/insert", .{note.id});
+    try w.writeAll("\">");
+    try csrfField(w, ctx.csrf);
+    try versionField(w, note.version);
+    try w.writeAll("<input type=\"hidden\" name=\"after\" value=\"-1\"><label for=\"new-kind\">Add a block at the start</label><select id=\"new-kind\" name=\"kind\">");
+    try kindOptions(w, .paragraph);
+    try w.writeAll("</select><div class=\"actions\"><button type=\"submit\" class=\"secondary\">Insert</button></div></form>\n");
+
+    if (args.parsed.len == 0) {
+        try w.writeAll("<p class=\"empty\">This note is empty. Add a block above, or <a href=\"/notes/");
+        try w.print("{d}/edit", .{note.id});
+        try w.writeAll("\">open the source editor</a>.</p>\n");
+    }
+    for (args.parsed, 0..) |block, i| {
+        try blockSection(w, ctx, args, block, i);
+    }
+    try w.writeAll("</div></div>\n");
+    try documentEnd(w);
+}
+
+fn blockSection(w: *Writer, ctx: Ctx, args: BlocksArgs, block: blocks.Block, i: usize) !void {
+    const note = args.note;
+    const source = args.body[block.start..block.end];
+    var head: [96]u8 = undefined;
+    const head_text = std.fmt.bufPrint(&head, "Block {d} of {d}: {s}", .{ i + 1, args.parsed.len, blocks.kindName(block.kind) }) catch "Block";
+    try w.writeAll("<section class=\"block\" id=\"block-");
+    try w.print("{d}", .{i});
+    try w.writeAll("\"><div class=\"block-head\"><h2 class=\"rail-title\">");
+    try util.escapeHtml(w, head_text);
+    try w.writeAll("</h2><div class=\"prose block-rendered\">");
+    try markdown.renderWithAlloc(args.alloc, w, source);
+    try w.writeAll("</div></div>\n");
+
+    // Edit form, in place per kind.
+    try w.writeAll("<form class=\"block-form\" method=\"post\" action=\"/notes/");
+    try w.print("{d}/blocks/update", .{note.id});
+    try w.writeAll("\">");
+    try csrfField(w, ctx.csrf);
+    try versionField(w, note.version);
+    try w.print("<input type=\"hidden\" name=\"block\" value=\"{d}\">", .{i});
+    switch (block.kind) {
+        .heading => {
+            const text = try blocks.stripKind(args.alloc, block.kind, source);
+            try w.writeAll("<label for=\"bh-text\">Heading text</label><input id=\"bh-text\" name=\"text\" type=\"text\" value=\"");
+            try util.escapeHtml(w, text);
+            try w.writeAll("\"><label for=\"bh-level\">Level</label><select id=\"bh-level\" name=\"level\">");
+            var lv: u8 = 1;
+            while (lv <= 6) : (lv += 1) {
+                try w.print("<option value=\"{d}\"", .{lv});
+                if (lv == block.level) try w.writeAll(" selected");
+                try w.print(">H{d}</option>", .{lv});
+            }
+            try w.writeAll("</select>");
+        },
+        .code => {
+            const text = try blocks.stripKind(args.alloc, block.kind, source);
+            try w.writeAll("<label for=\"bc-lang\">Language (optional)</label><input id=\"bc-lang\" name=\"lang\" type=\"text\" value=\"");
+            try util.escapeHtml(w, block.lang);
+            try w.writeAll("\"><label for=\"bc-text\">Code</label><textarea id=\"bc-text\" name=\"text\" rows=\"6\" spellcheck=\"false\">");
+            try util.escapeHtml(w, text);
+            try w.writeAll("</textarea>");
+        },
+        .link, .image => {
+            const parts = splitLinkOrImage(source);
+            try w.writeAll("<label for=\"bl-text\">");
+            try w.writeAll(if (block.kind == .link) "Link text" else "Alt text");
+            try w.writeAll("</label><input id=\"bl-text\" name=\"text\" type=\"text\" value=\"");
+            try util.escapeHtml(w, parts.text);
+            try w.writeAll("\"><label for=\"bl-url\">");
+            try w.writeAll(if (block.kind == .link) "Link URL" else "Image path (must start with /)");
+            try w.writeAll("</label><input id=\"bl-url\" name=\"url\" type=\"text\" value=\"");
+            try util.escapeHtml(w, parts.url);
+            try w.writeAll("\"><p class=\"muted small\">Markdown wraps the text and URL in <code>[](url)</code>-shaped syntax; the server validates the URL when rendering.</p>");
+        },
+        .table => {
+            try tableForm(w, args, source);
+        },
+        .hr => {
+            try w.writeAll("<p class=\"muted small\">A horizontal rule has no text. Delete it or convert it below.</p>");
+        },
+        else => {
+            const text = try blocks.stripKind(args.alloc, block.kind, source);
+            const is_raw = block.kind == .raw;
+            try w.writeAll("<label for=\"bt\">");
+            try w.writeAll(if (is_raw) "Markdown (verbatim)" else "Text (one item per line for lists; use [x] on checklist lines to keep them checked)");
+            try w.writeAll("</label><textarea id=\"bt\" name=\"text\" rows=\"4\" spellcheck=\"true\">");
+            try util.escapeHtml(w, text);
+            try w.writeAll("</textarea>");
+        },
+    }
+    try w.writeAll("<div class=\"actions\"><button type=\"submit\" class=\"primary\">Save block</button></div></form>\n");
+
+    // Change type (convert) form.
+    try w.writeAll("<form class=\"block-ops\" method=\"post\" action=\"/notes/");
+    try w.print("{d}/blocks/convert", .{note.id});
+    try w.writeAll("\">");
+    try csrfField(w, ctx.csrf);
+    try versionField(w, note.version);
+    try w.print("<input type=\"hidden\" name=\"block\" value=\"{d}\">", .{i});
+    try w.writeAll("<label for=\"conv\">Change type</label><select id=\"conv\" name=\"kind\">");
+    try kindOptions(w, block.kind);
+    try w.writeAll("</select><button type=\"submit\" class=\"secondary\">Convert</button></form>\n");
+
+    // Move/insert/delete ops.
+    try w.writeAll("<div class=\"block-actions\">");
+    if (i > 0) try opForm(w, ctx, note, "move", i, "<button type=\"submit\" class=\"secondary\">Move up</button>", "<input type=\"hidden\" name=\"dir\" value=\"up\">");
+    if (i + 1 < args.parsed.len) try opForm(w, ctx, note, "move", i, "<button type=\"submit\" class=\"secondary\">Move down</button>", "<input type=\"hidden\" name=\"dir\" value=\"down\">");
+    try opForm(w, ctx, note, "duplicate", i, "<button type=\"submit\" class=\"secondary\">Duplicate</button>", "");
+    if (args.confirm != null and args.confirm.? == i) {
+        try w.writeAll("<form class=\"inline-confirm\" method=\"post\" action=\"/notes/");
+        try w.print("{d}/blocks/delete", .{note.id});
+        try w.writeAll("\">");
+        try csrfField(w, ctx.csrf);
+        try versionField(w, note.version);
+        try w.print("<input type=\"hidden\" name=\"block\" value=\"{d}\">", .{i});
+        try w.writeAll("<p>Delete this block? Its Markdown will be removed; other blocks stay byte-for-byte identical.</p><div class=\"actions\"><button type=\"submit\" class=\"danger\">Delete block</button><a class=\"button secondary\" href=\"/notes/");
+        try w.print("{d}/blocks#block-{d}", .{ note.id, i });
+        try w.writeAll("\">Cancel</a></div></form>");
+    } else {
+        try w.writeAll("<a class=\"button secondary\" href=\"/notes/");
+        try w.print("{d}/blocks?confirm={d}#block-{d}", .{ note.id, i, i });
+        try w.writeAll("\">Delete…</a>");
+    }
+    // Insert-after form.
+    try w.writeAll("<form class=\"block-ops\" method=\"post\" action=\"/notes/");
+    try w.print("{d}/blocks/insert", .{note.id});
+    try w.writeAll("\">");
+    try csrfField(w, ctx.csrf);
+    try versionField(w, note.version);
+    try w.print("<input type=\"hidden\" name=\"after\" value=\"{d}\">", .{i});
+    try w.writeAll("<label for=\"ins\">Insert after</label><select id=\"ins\" name=\"kind\">");
+    try kindOptions(w, .paragraph);
+    try w.writeAll("</select><button type=\"submit\" class=\"secondary\">Insert</button></form>");
+    try w.writeAll("</div></section>\n");
+}
+
+fn opForm(w: *Writer, ctx: Ctx, note: db.Note, op: []const u8, i: usize, button_html: []const u8, extra: []const u8) !void {
+    try w.writeAll("<form class=\"block-ops\" method=\"post\" action=\"/notes/");
+    try w.print("{d}/blocks/{s}", .{ note.id, op });
+    try w.writeAll("\">");
+    try csrfField(w, ctx.csrf);
+    try versionField(w, note.version);
+    try w.print("<input type=\"hidden\" name=\"block\" value=\"{d}\">", .{i});
+    try w.writeAll(extra);
+    try w.writeAll(button_html);
+    try w.writeAll("</form>");
+}
+
+fn splitLinkOrImage(source: []const u8) struct { text: []const u8, url: []const u8 } {
+    var s = std.mem.trim(u8, source, " \t\r");
+    if (std.mem.startsWith(u8, s, "![")) {
+        s = s[2..];
+    } else if (std.mem.startsWith(u8, s, "[")) {
+        s = s[1..];
+    }
+    const close = std.mem.indexOf(u8, s, "](") orelse return .{ .text = s, .url = "" };
+    const url = s[close + 2 ..];
+    return .{ .text = s[0..close], .url = if (url.len > 0 and url[url.len - 1] == ')') url[0 .. url.len - 1] else url };
+}
+
+fn tableForm(w: *Writer, args: BlocksArgs, source: []const u8) !void {
+    const table = try blocks.parseTable(args.alloc, source);
+    if (table.cols == 0 or table.cols * (table.header.len + table.rows.len / table.cols) > blocks.max_table_cells) {
+        try w.writeAll("<p class=\"muted small\">This table is too large for the cell editor. Edit it as raw Markdown below.</p><label for=\"tt\">Table Markdown (verbatim)</label><textarea id=\"tt\" name=\"text\" rows=\"8\">");
+        try util.escapeHtml(w, source);
+        try w.writeAll("</textarea>");
+        return;
+    }
+    try w.writeAll("<p class=\"muted small\">Edit cells as text. Alignment is kept per column. Structural buttons act on the saved table; save first if you edited cells.</p><table class=\"cell-grid\"><thead><tr>");
+    for (table.header, 0..) |_, c| {
+        try w.print("<th><input aria-label=\"Header column {d}\" name=\"cell_h_{d}\" value=\"", .{ c + 1, c });
+        try util.escapeHtml(w, table.header[c]);
+        try w.writeAll("\"></th>");
+    }
+    try w.writeAll("</tr><tr>");
+    for (table.aligns, 0..) |a, c| {
+        try w.print("<td><label>Align <select name=\"align_{d}\">", .{c});
+        const opts = [_]struct { []const u8, []const u8 }{ .{ "", "None" }, .{ "l", "Left" }, .{ "c", "Center" }, .{ "r", "Right" } };
+        for (opts) |o| {
+            try w.writeAll("<option value=\"");
+            try w.writeAll(o[0]);
+            try w.writeAll("\"");
+            if ((a == 0 and o[0].len == 0) or (a != 0 and o[0].len == 1 and o[0][0] == a)) try w.writeAll(" selected");
+            try w.writeAll(">");
+            try w.writeAll(o[1]);
+            try w.writeAll("</option>");
+        }
+        try w.writeAll("</select></label></td>");
+    }
+    try w.writeAll("</tr></thead><tbody>");
+    const row_count = if (table.cols > 0) table.rows.len / table.cols else 0;
+    for (0..row_count) |r| {
+        try w.writeAll("<tr>");
+        for (0..table.cols) |c| {
+            try w.print("<td><input aria-label=\"Row {d} column {d}\" name=\"cell_r{d}_c{d}\" value=\"", .{ r + 1, c + 1, r, c });
+            try util.escapeHtml(w, table.rows[r * table.cols + c]);
+            try w.writeAll("\"></td>");
+        }
+        try w.writeAll("</tr>");
+    }
+    try w.writeAll("</tbody></table><div class=\"actions\"><button type=\"submit\" class=\"secondary\" formaction=\"/notes/");
+    try w.print("{d}/blocks/tableaddrow", .{args.note.id});
+    try w.writeAll("\">Add row</button><button type=\"submit\" class=\"secondary\" formaction=\"/notes/");
+    try w.print("{d}/blocks/tabledelrow", .{args.note.id});
+    try w.writeAll("\">Delete last row</button><button type=\"submit\" class=\"secondary\" formaction=\"/notes/");
+    try w.print("{d}/blocks/tableaddcol", .{args.note.id});
+    try w.writeAll("\">Add column</button><button type=\"submit\" class=\"secondary\" formaction=\"/notes/");
+    try w.print("{d}/blocks/tabledelcol", .{args.note.id});
+    try w.writeAll("\">Delete last column</button></div>");
 }
 
 pub fn errorPage(w: *Writer, ctx: Ctx, heading: []const u8, message: []const u8) !void {

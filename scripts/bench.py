@@ -246,12 +246,31 @@ def run_scenario(binary, count, body_size, requests, concurrency, outdir):
         search_url = "/notes?q=" + urllib.parse.quote("needle-42")
         search_samples = measure(lambda: client.request("GET", search_url), requests)
         save_samples = measure(do_save, max(20, requests // 2), warmup=3)
+
+        def do_blocks_page():
+            status, _, _ = client.request("GET", note_url + "/blocks")
+            assert status == 200, status
+
+        def do_preview():
+            # Preview renders the draft server-side and never writes; the
+            # current save version therefore stays valid throughout.
+            status, _, _ = client.post_form(note_url + "/preview", {
+                "csrf": csrf, "title": "Benchmark note",
+                "body": "preview payload " + "y" * 1024,
+                "version": save_state["version"],
+            })
+            assert status == 200, status
+
+        blocks_samples = measure(do_blocks_page, requests)
+        preview_samples = measure(do_preview, requests)
         result["hwm_after_saves_kib"] = hwm_kib(proc.pid)
 
         result["get_note"] = summarize(get_samples)
         result["list"] = summarize(list_samples)
         result["search"] = summarize(search_samples)
         result["save"] = summarize(save_samples)
+        result["blocks_page"] = summarize(blocks_samples)
+        result["preview"] = summarize(preview_samples)
 
         conc = {}
         for n in concurrency:

@@ -43,12 +43,15 @@ pub const Form = struct {
 
 /// Parses application/x-www-form-urlencoded data. Duplicate field names are
 /// rejected because every FeatherNote form has a fixed, unambiguous shape.
+/// The 1024-field cap bounds parser work for the largest native form (a
+/// block-editor table grid); total work is already bounded by the encoded
+/// request size cap in the HTTP layer.
 pub fn parseForm(arena: Allocator, body: []const u8) ParseError!Form {
     var fields: std.ArrayList(Field) = .empty;
     var it = std.mem.splitScalar(u8, body, '&');
     while (it.next()) |pair| {
         if (pair.len == 0) continue;
-        if (fields.items.len >= 32) return ParseError.TooManyFields;
+        if (fields.items.len >= 1024) return ParseError.TooManyFields;
         const eq = std.mem.findScalar(u8, pair, '=') orelse return ParseError.InvalidForm;
         const raw_name = pair[0..eq];
         const raw_value = pair[eq + 1 ..];

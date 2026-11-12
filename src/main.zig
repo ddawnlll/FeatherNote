@@ -9,6 +9,7 @@ const views = @import("views.zig");
 const themes = @import("themes.zig");
 const multipart = @import("multipart.zig");
 const markdown = @import("markdown.zig");
+const blocks = @import("blocks.zig");
 const media = @import("media.zig");
 const mcp = @import("mcp.zig");
 const assets = @import("assets");
@@ -577,6 +578,10 @@ fn dispatch(
         try views.newNote(&aw.writer, ctx, "", "", null);
         return .{ .status = .ok, .body = aw.written() };
     }
+    if (std.mem.eql(u8, path, "/notes/preview")) {
+        if (method != .POST) return methodNotAllowed(arena, ctx, "POST");
+        return handlePreviewNew(app, request, arena, ctx, content_type);
+    }
     if (std.mem.eql(u8, path, "/trash")) {
         if (!isReadMethod(method)) return methodNotAllowed(arena, ctx, "GET, HEAD");
         const rows = try app.database.listTrash(arena, (query.page - 1) * util.page_size, util.page_size);
@@ -618,6 +623,25 @@ fn dispatch(
             if (sub_action != null or final_action != null) return notFound(arena, ctx);
             if (!isReadMethod(method)) return methodNotAllowed(arena, ctx, "GET, HEAD");
             return handleEditor(app, arena, ctx, id, query.saved, query.uploaded);
+        } else if (std.mem.eql(u8, act, "preview")) {
+            if (sub_action != null or final_action != null) return notFound(arena, ctx);
+            if (method != .POST) return methodNotAllowed(arena, ctx, "POST");
+            return handlePreview(app, request, arena, ctx, id, content_type);
+        } else if (std.mem.eql(u8, act, "blocks")) {
+            if (sub_action == null) {
+                if (!isReadMethod(method)) return methodNotAllowed(arena, ctx, "GET, HEAD");
+                return handleBlocksGet(app, arena, ctx, id, raw_query);
+            }
+            const op = sub_action.?;
+            if (final_action != null) return notFound(arena, ctx);
+            const valid_ops = [_][]const u8{ "update", "insert", "delete", "move", "duplicate", "convert", "title", "tableaddrow", "tabledelrow", "tableaddcol", "tabledelcol" };
+            var known = false;
+            for (valid_ops) |v| {
+                if (std.mem.eql(u8, op, v)) known = true;
+            }
+            if (!known) return notFound(arena, ctx);
+            if (method != .POST) return methodNotAllowed(arena, ctx, "POST");
+            return handleBlocksOp(app, request, arena, ctx, id, op, content_type);
         } else if (std.mem.eql(u8, act, "files")) {
             const sub = sub_action orelse "";
             if (final_action == null) {
@@ -983,6 +1007,391 @@ fn renderEditorError(app: *App, arena: Allocator, ctx: views.Ctx, note: db.Note,
         .error_message = message,
     });
     return .{ .status = .bad_request, .body = aw.written() };
+}
+
+fn renderEditorPreview(arena: Allocator, ctx: views.Ctx, args: views.EditorArgs, draft_body: []const u8) !Response {
+    var html_aw = std.Io.Writer.Allocating.init(arena);
+    try markdown.renderWithAlloc(arena, &html_aw.writer, draft_body);
+    var full = args;
+    full.preview_html = html_aw.written();
+    var aw = std.Io.Writer.Allocating.init(arena);
+    try views.editor(&aw.writer, ctx, full);
+    return .{ .status = .ok, .body = aw.written() };
+}
+
+fn handlePreviewNew(app: *App, request: *http.Server.Request, arena: Allocator, ctx: views.Ctx, content_type: ?[]const u8) !Response {
+    if (!isFormContentType(content_type)) {
+        return htmlError(arena, ctx, .unsupported_media_type, "Unsupported form", "Submit the HTML note form.");
+    }
+    const body = readBody(request, arena) catch return bodyErrorResponse(arena, ctx, request, content_type);
+    const form = util.parseForm(arena, body) catch return htmlError(arena, ctx, .bad_request, "Malformed form", "The note form could not be parsed.");
+    if (!csrfOk(ctx.csrf, form)) return csrfFailure(arena, ctx);
+    const title = form.get("title") orelse "";
+    const note_body = form.get("body") orelse "";
+    validateDraft(title, note_body) catch |err| {
+        var aw = std.Io.Writer.Allocating.init(arena);
+        try views.newNote(&aw.writer, ctx, title, note_body, validationMessage(err));
+        return .{ .status = .bad_request, .body = aw.written() };
+    };
+    // Preview only: render the unsaved draft, write nothing.
+    _ = app;
+    return renderEditorPreview(arena, ctx, .{ .note = null, .sidebar_rows = &.{}, .saved = false, .draft_title = title, .draft_body = note_body }, note_body);
+}
+
+fn handlePreview(app: *App, request: *http.Server.Request, arena: Allocator, ctx: views.Ctx, id: i64, content_type: ?[]const u8) !Response {
+    if (!isFormContentType(content_type)) {
+        return htmlError(arena, ctx, .unsupported_media_type, "Unsupported form", "Submit the HTML note form.");
+    }
+    const note = try app.database.getNote(arena, id, false) orelse {
+        const trashed = try app.database.getNote(arena, id, true);
+        if (trashed != null) return htmlError(arena, ctx, .conflict, "Note is in Trash", "Restore the note before editing it.");
+        return notFound(arena, ctx);
+    };
+    const body = readBody(request, arena) catch return bodyErrorResponse(arena, ctx, request, content_type);
+    const form = util.parseForm(arena, body) catch return htmlError(arena, ctx, .bad_request, "Malformed form", "The note form could not be parsed.");
+    if (!csrfOk(ctx.csrf, form)) return csrfFailure(arena, ctx);
+    const title = form.get("title") orelse "";
+    const note_body = form.get("body") orelse "";
+    const version = formVersion(form) catch return renderEditorError(app, arena, ctx, note, title, note_body, "The form version was missing or invalid. Reload and try again.");
+    validateDraft(title, note_body) catch |err| return renderEditorError(app, arena, ctx, note, title, note_body, validationMessage(err));
+    if (version != note.version) {
+        const latest = (try app.database.getNote(arena, id, false)) orelse return notFound(arena, ctx);
+        var aw = std.Io.Writer.Allocating.init(arena);
+        try views.conflict(&aw.writer, ctx, latest, title, note_body);
+        return .{ .status = .conflict, .body = aw.written() };
+    }
+    // Preview only: render the draft, write nothing to the database.
+    const sidebar_rows = try app.database.listNotes(arena, null, 0, 30);
+    const attachments = try app.database.attachmentsForNote(arena, id);
+    return renderEditorPreview(arena, ctx, .{ .note = note, .sidebar_rows = sidebar_rows, .saved = false, .attachments = attachments, .draft_title = title, .draft_body = note_body }, note_body);
+}
+
+fn parseConfirm(raw: ?[]const u8) ?usize {
+    const text = raw orelse return null;
+    var it = std.mem.splitScalar(u8, text, '&');
+    while (it.next()) |pair| {
+        const eq = std.mem.findScalar(u8, pair, '=') orelse continue;
+        if (!std.mem.eql(u8, pair[0..eq], "confirm")) continue;
+        const n = std.fmt.parseInt(usize, pair[eq + 1 ..], 10) catch return null;
+        return n;
+    }
+    return null;
+}
+
+fn renderBlocksError(app: *App, arena: Allocator, ctx: views.Ctx, note: db.Note, attempted: ?[]const u8, message: []const u8, status: http.Status) !Response {
+    const sidebar_rows = try app.database.listNotes(arena, null, 0, 30);
+    const body = attempted orelse note.body;
+    const parsed = try blocks.parseBlocks(arena, body);
+    var aw = std.Io.Writer.Allocating.init(arena);
+    try views.blockEditor(&aw.writer, ctx, .{ .note = note, .alloc = arena, .parsed = parsed, .body = body, .sidebar_rows = sidebar_rows, .error_message = message });
+    return .{ .status = status, .body = aw.written() };
+}
+
+fn handleBlocksGet(app: *App, arena: Allocator, ctx: views.Ctx, id: i64, raw_query: ?[]const u8) !Response {
+    const note = try app.database.getNote(arena, id, false) orelse {
+        const trashed = try app.database.getNote(arena, id, true);
+        if (trashed != null) return .{ .status = .see_other, .location = "/trash" };
+        return notFound(arena, ctx);
+    };
+    const sidebar_rows = try app.database.listNotes(arena, null, 0, 30);
+    const parsed = try blocks.parseBlocks(arena, note.body);
+    var aw = std.Io.Writer.Allocating.init(arena);
+    try views.blockEditor(&aw.writer, ctx, .{ .note = note, .alloc = arena, .parsed = parsed, .body = note.body, .sidebar_rows = sidebar_rows, .confirm = parseConfirm(raw_query) });
+    return .{ .status = .ok, .body = aw.written() };
+}
+
+fn spliceBody(arena: Allocator, body: []const u8, start: usize, end: usize, replacement: []const u8) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.appendSlice(arena, body[0..start]);
+    try buf.appendSlice(arena, replacement);
+    try buf.appendSlice(arena, body[end..]);
+    return try buf.toOwnedSlice(arena);
+}
+
+fn blockRedirect(arena: Allocator, id: i64, index: ?usize) ![]const u8 {
+    if (index) |i| return try std.fmt.allocPrint(arena, "/notes/{d}/blocks#block-{d}", .{ id, i });
+    return try std.fmt.allocPrint(arena, "/notes/{d}/blocks", .{id});
+}
+
+fn submitNewBody(app: *App, arena: Allocator, ctx: views.Ctx, note: db.Note, version: i64, new_body: []const u8, redirect_index: ?usize) !Response {
+    util.validateBody(new_body) catch |err| {
+        return renderBlocksError(app, arena, ctx, note, new_body, validationMessage(err), .bad_request);
+    };
+    const result = try app.database.updateNote(note.id, version, note.title, new_body, nowSeconds(app.io));
+    switch (result) {
+        .ok => return .{ .status = .see_other, .location = try blockRedirect(arena, note.id, redirect_index) },
+        .conflict => {
+            const latest = (try app.database.getNote(arena, note.id, false)) orelse return notFound(arena, ctx);
+            var aw = std.Io.Writer.Allocating.init(arena);
+            try views.conflict(&aw.writer, ctx, latest, note.title, new_body);
+            return .{ .status = .conflict, .body = aw.written() };
+        },
+        .deleted => return htmlError(arena, ctx, .conflict, "Note is in Trash", "This note was moved to Trash. Restore it before saving."),
+        .not_found => return notFound(arena, ctx),
+    }
+}
+
+fn parseBlockIndex(form: util.Form, count: usize) ?usize {
+    const raw = form.get("block") orelse return null;
+    const n = std.fmt.parseInt(i64, raw, 10) catch return null;
+    if (n < 0 or @as(usize, @intCast(n)) >= count) return null;
+    return @intCast(n);
+}
+
+fn kindFromText(text: []const u8) ?blocks.Kind {
+    if (std.mem.eql(u8, text, "paragraph")) return .paragraph;
+    if (std.mem.eql(u8, text, "heading")) return .heading;
+    if (std.mem.eql(u8, text, "list_unordered")) return .list_unordered;
+    if (std.mem.eql(u8, text, "list_ordered")) return .list_ordered;
+    if (std.mem.eql(u8, text, "list_task")) return .list_task;
+    if (std.mem.eql(u8, text, "quote")) return .quote;
+    if (std.mem.eql(u8, text, "code")) return .code;
+    if (std.mem.eql(u8, text, "table")) return .table;
+    if (std.mem.eql(u8, text, "hr")) return .hr;
+    if (std.mem.eql(u8, text, "link")) return .link;
+    if (std.mem.eql(u8, text, "image")) return .image;
+    if (std.mem.eql(u8, text, "raw")) return .raw;
+    return null;
+}
+
+fn cardAssistText(arena: Allocator, kind: blocks.Kind) ![]u8 {
+    return switch (kind) {
+        .paragraph => blocks.generateBlock(arena, .paragraph, "New paragraph", 0, ""),
+        .heading => blocks.generateBlock(arena, .heading, "New heading", 2, ""),
+        .list_unordered => blocks.generateBlock(arena, .list_unordered, "item", 0, ""),
+        .list_ordered => blocks.generateBlock(arena, .list_ordered, "item", 0, ""),
+        .list_task => blocks.generateBlock(arena, .list_task, "task", 0, ""),
+        .quote => blocks.generateBlock(arena, .quote, "New quote", 0, ""),
+        .code => blocks.generateBlock(arena, .code, "code", 0, ""),
+        .table => blocks.generateBlock(arena, .table, "", 0, ""),
+        .hr => blocks.generateBlock(arena, .hr, "", 0, ""),
+        .link => try arena.dupe(u8, "[Link text](https://example.com)"),
+        .image => try arena.dupe(u8, "![Alt text](/files/1/image.png)"),
+        .raw => try arena.dupe(u8, "Raw Markdown is stored verbatim."),
+    };
+}
+
+fn handleBlocksOp(app: *App, request: *http.Server.Request, arena: Allocator, ctx: views.Ctx, id: i64, op: []const u8, content_type: ?[]const u8) !Response {
+    if (!isFormContentType(content_type)) return htmlError(arena, ctx, .unsupported_media_type, "Unsupported form", "Submit the HTML form.");
+    const note = try app.database.getNote(arena, id, false) orelse {
+        const trashed = try app.database.getNote(arena, id, true);
+        if (trashed != null) return htmlError(arena, ctx, .conflict, "Note is in Trash", "Restore the note before editing it.");
+        return notFound(arena, ctx);
+    };
+    const body = readBody(request, arena) catch return bodyErrorResponse(arena, ctx, request, content_type);
+    const form = util.parseForm(arena, body) catch return htmlError(arena, ctx, .bad_request, "Malformed form", "The form could not be parsed.");
+    if (!csrfOk(ctx.csrf, form)) return csrfFailure(arena, ctx);
+    const version = formVersion(form) catch return renderBlocksError(app, arena, ctx, note, null, "The form version was missing or invalid. Reload and try again.", .bad_request);
+    const parsed = try blocks.parseBlocks(arena, note.body);
+
+    if (std.mem.eql(u8, op, "title")) {
+        const title = form.get("title") orelse "";
+        util.validateTitle(title) catch |err| return renderBlocksError(app, arena, ctx, note, null, validationMessage(err), .bad_request);
+        const result = try app.database.updateNote(note.id, version, title, note.body, nowSeconds(app.io));
+        switch (result) {
+            .ok => return .{ .status = .see_other, .location = try blockRedirect(arena, note.id, null) },
+            .conflict => {
+                const latest = (try app.database.getNote(arena, note.id, false)) orelse return notFound(arena, ctx);
+                var aw = std.Io.Writer.Allocating.init(arena);
+                try views.conflict(&aw.writer, ctx, latest, title, note.body);
+                return .{ .status = .conflict, .body = aw.written() };
+            },
+            .deleted => return htmlError(arena, ctx, .conflict, "Note is in Trash", "This note was moved to Trash. Restore it before saving."),
+            .not_found => return notFound(arena, ctx),
+        }
+    }
+
+    if (std.mem.eql(u8, op, "insert")) {
+        const kind = kindFromText(form.get("kind") orelse "paragraph") orelse return renderBlocksError(app, arena, ctx, note, null, "Unknown block type.", .bad_request);
+        if (parsed.len >= blocks.max_blocks) return renderBlocksError(app, arena, ctx, note, null, "This note already has the maximum of 200 blocks. Use the source editor.", .bad_request);
+        const after_raw = form.get("after") orelse "-1";
+        const after = std.fmt.parseInt(i64, after_raw, 10) catch -99;
+        const newtext = try cardAssistText(arena, kind);
+        var new_body: []u8 = undefined;
+        var anchor: usize = 0;
+        if (parsed.len == 0 or after == -1) {
+            if (parsed.len != 0) {
+                var with_sep = std.ArrayList(u8).empty;
+                try with_sep.appendSlice(arena, newtext);
+                try with_sep.appendSlice(arena, "\n\n");
+                try with_sep.appendSlice(arena, note.body);
+                new_body = try with_sep.toOwnedSlice(arena);
+            } else {
+                new_body = try arena.dupe(u8, newtext);
+            }
+            anchor = 0;
+        } else {
+            if (after < 0 or @as(usize, @intCast(after)) >= parsed.len) return renderBlocksError(app, arena, ctx, note, null, "Invalid block position.", .bad_request);
+            const b = parsed[@intCast(after)];
+            var buf = std.ArrayList(u8).empty;
+            try buf.appendSlice(arena, note.body[0..b.end]);
+            try buf.appendSlice(arena, "\n\n");
+            try buf.appendSlice(arena, newtext);
+            try buf.appendSlice(arena, note.body[b.end..]);
+            new_body = try buf.toOwnedSlice(arena);
+            anchor = @as(usize, @intCast(after)) + 1;
+        }
+        return submitNewBody(app, arena, ctx, note, version, new_body, anchor);
+    }
+
+    const block_idx = parseBlockIndex(form, parsed.len) orelse return renderBlocksError(app, arena, ctx, note, null, "Invalid block number. Reload and try again.", .bad_request);
+    const block = parsed[block_idx];
+    const source = note.body[block.start..block.end];
+
+    if (std.mem.eql(u8, op, "update")) {
+        var replacement: []u8 = undefined;
+        switch (block.kind) {
+            .heading => {
+                const level = std.fmt.parseInt(u8, form.get("level") orelse "2", 10) catch 99;
+                if (level < 1 or level > 6) return renderBlocksError(app, arena, ctx, note, null, "Heading level must be 1 to 6.", .bad_request);
+                replacement = try blocks.generateBlock(arena, .heading, form.get("text") orelse "", level, "");
+            },
+            .code => replacement = try blocks.generateBlock(arena, .code, form.get("text") orelse "", 0, form.get("lang") orelse ""),
+            .link => replacement = try std.fmt.allocPrint(arena, "[{s}]({s})", .{ form.get("text") orelse "", form.get("url") orelse "" }),
+            .image => replacement = try std.fmt.allocPrint(arena, "![{s}]({s})", .{ form.get("text") orelse "", form.get("url") orelse "" }),
+            .table => {
+                const table = try blocks.parseTable(arena, source);
+                if (form.get("cell_h_0") == null) {
+                    replacement = try arena.dupe(u8, form.get("text") orelse source);
+                } else {
+                    var header: [][]const u8 = try arena.alloc([]const u8, table.cols);
+                    for (0..table.cols) |c| {
+                        var name_buf: [24]u8 = undefined;
+                        const name = try std.fmt.bufPrint(&name_buf, "cell_h_{d}", .{c});
+                        header[c] = try arena.dupe(u8, form.get(name) orelse table.header[c]);
+                    }
+                    var aligns: []u8 = try arena.alloc(u8, table.cols);
+                    for (0..table.cols) |c| {
+                        var name_buf: [24]u8 = undefined;
+                        const name = try std.fmt.bufPrint(&name_buf, "align_{d}", .{c});
+                        const v = form.get(name) orelse "";
+                        aligns[c] = if (v.len == 1) v[0] else 0;
+                    }
+                    var rows: [][]const u8 = try arena.alloc([]const u8, table.rows.len);
+                    for (table.rows, 0..) |old, k| {
+                        const r = k / table.cols;
+                        const c = k % table.cols;
+                        var name_buf: [24]u8 = undefined;
+                        const name = try std.fmt.bufPrint(&name_buf, "cell_r{d}_c{d}", .{ r, c });
+                        rows[k] = try arena.dupe(u8, form.get(name) orelse old);
+                    }
+                    replacement = try blocks.generateTable(arena, .{ .header = header, .aligns = aligns, .rows = rows, .cols = table.cols });
+                }
+            },
+            else => replacement = try blocks.generateBlock(arena, block.kind, form.get("text") orelse "", block.level, block.lang),
+        }
+        const new_body = try spliceBody(arena, note.body, block.start, block.end, replacement);
+        return submitNewBody(app, arena, ctx, note, version, new_body, block_idx);
+    }
+    if (std.mem.eql(u8, op, "tableaddrow") or std.mem.eql(u8, op, "tabledelrow") or std.mem.eql(u8, op, "tableaddcol") or std.mem.eql(u8, op, "tabledelcol")) {
+        var table = try blocks.parseTable(arena, source);
+        if (table.cols == 0) return renderBlocksError(app, arena, ctx, note, null, "This block is not a valid table.", .bad_request);
+        const old_cols = table.cols;
+        const row_count = if (table.cols > 0) table.rows.len / old_cols else 0;
+        var new_rows: std.ArrayList([]const u8) = .empty;
+        var new_header: std.ArrayList([]const u8) = .empty;
+        if (std.mem.eql(u8, op, "tableaddrow")) {
+            for (table.rows) |c| try new_rows.append(arena, c);
+            for (0..old_cols) |_| try new_rows.append(arena, "");
+            for (table.header) |c| try new_header.append(arena, c);
+        } else if (std.mem.eql(u8, op, "tabledelrow")) {
+            if (row_count == 0) return renderBlocksError(app, arena, ctx, note, null, "The table has no rows to delete.", .bad_request);
+            for (0..(row_count - 1) * old_cols) |k| try new_rows.append(arena, table.rows[k]);
+            for (table.header) |c| try new_header.append(arena, c);
+        } else if (std.mem.eql(u8, op, "tableaddcol")) {
+            for (table.header) |c| try new_header.append(arena, c);
+            try new_header.append(arena, "Column");
+            for (0..row_count) |r| {
+                for (0..old_cols) |c| try new_rows.append(arena, table.rows[r * old_cols + c]);
+                try new_rows.append(arena, "");
+            }
+        } else {
+            if (old_cols <= 1) return renderBlocksError(app, arena, ctx, note, null, "The table needs at least one column.", .bad_request);
+            for (table.header[0 .. old_cols - 1]) |c| try new_header.append(arena, c);
+            for (0..row_count) |r| {
+                for (0..old_cols - 1) |c| try new_rows.append(arena, table.rows[r * old_cols + c]);
+            }
+        }
+        var aligns: std.ArrayList(u8) = .empty;
+        for (table.aligns, 0..) |a, c| {
+            if (std.mem.eql(u8, op, "tabledelcol") and c == old_cols - 1) break;
+            try aligns.append(arena, a);
+        }
+        if (std.mem.eql(u8, op, "tableaddcol")) try aligns.append(arena, 0);
+        const new_cols = new_header.items.len;
+        const new_table: blocks.Table = .{ .header = try new_header.toOwnedSlice(arena), .aligns = try aligns.toOwnedSlice(arena), .rows = try new_rows.toOwnedSlice(arena), .cols = new_cols };
+        const new_body = try spliceBody(arena, note.body, block.start, block.end, try blocks.generateTable(arena, new_table));
+        return submitNewBody(app, arena, ctx, note, version, new_body, block_idx);
+    }
+    if (std.mem.eql(u8, op, "delete")) {
+        var new_body: []u8 = undefined;
+        if (parsed.len == 1) {
+            new_body = try arena.dupe(u8, "");
+        } else if (block_idx == 0) {
+            new_body = try spliceBody(arena, note.body, block.start, parsed[1].start, "");
+        } else if (block_idx + 1 == parsed.len) {
+            new_body = try spliceBody(arena, note.body, parsed[block_idx - 1].end, block.end, "");
+        } else {
+            // Remove block plus the following separator bytes.
+            new_body = try spliceBody(arena, note.body, block.start, parsed[block_idx + 1].start, "");
+        }
+        return submitNewBody(app, arena, ctx, note, version, new_body, if (parsed.len > 1) (if (block_idx < parsed.len - 1) block_idx else parsed.len - 2) else null);
+    }
+    if (std.mem.eql(u8, op, "move")) {
+        const dir = form.get("dir") orelse "";
+        if (std.mem.eql(u8, dir, "up")) {
+            if (block_idx == 0) return renderBlocksError(app, arena, ctx, note, null, "Already the first block.", .bad_request);
+            const prev = parsed[block_idx - 1];
+            var buf = std.ArrayList(u8).empty;
+            try buf.appendSlice(arena, note.body[0..prev.start]);
+            try buf.appendSlice(arena, source);
+            try buf.appendSlice(arena, note.body[prev.end..block.start]);
+            try buf.appendSlice(arena, note.body[prev.start..prev.end]);
+            try buf.appendSlice(arena, note.body[block.end..]);
+            return submitNewBody(app, arena, ctx, note, version, try buf.toOwnedSlice(arena), block_idx - 1);
+        }
+        if (std.mem.eql(u8, dir, "down")) {
+            if (block_idx + 1 == parsed.len) return renderBlocksError(app, arena, ctx, note, null, "Already the last block.", .bad_request);
+            const next = parsed[block_idx + 1];
+            var buf = std.ArrayList(u8).empty;
+            try buf.appendSlice(arena, note.body[0..block.start]);
+            try buf.appendSlice(arena, note.body[next.start..next.end]);
+            try buf.appendSlice(arena, note.body[block.end..next.start]);
+            try buf.appendSlice(arena, source);
+            try buf.appendSlice(arena, note.body[next.end..]);
+            return submitNewBody(app, arena, ctx, note, version, try buf.toOwnedSlice(arena), block_idx + 1);
+        }
+        return renderBlocksError(app, arena, ctx, note, null, "Missing direction.", .bad_request);
+    }
+    if (std.mem.eql(u8, op, "duplicate")) {
+        var buf = std.ArrayList(u8).empty;
+        try buf.appendSlice(arena, note.body[0..block.end]);
+        try buf.appendSlice(arena, "\n\n");
+        try buf.appendSlice(arena, source);
+        try buf.appendSlice(arena, note.body[block.end..]);
+        return submitNewBody(app, arena, ctx, note, version, try buf.toOwnedSlice(arena), block_idx + 1);
+    }
+    if (std.mem.eql(u8, op, "convert")) {
+        const target = kindFromText(form.get("kind") orelse "") orelse return renderBlocksError(app, arena, ctx, note, null, "Unknown block type.", .bad_request);
+        if (target == block.kind) return renderBlocksError(app, arena, ctx, note, null, "Already that type.", .bad_request);
+        var replacement: []u8 = undefined;
+        switch (target) {
+            .link => replacement = try std.fmt.allocPrint(arena, "[{s}](https://example.com)", .{try blocks.stripKind(arena, block.kind, source)}),
+            .image => replacement = try std.fmt.allocPrint(arena, "![{s}](/files/1/image.png)", .{try blocks.stripKind(arena, block.kind, source)}),
+            .table => replacement = try blocks.generateBlock(arena, .table, "", 0, ""),
+            .hr => replacement = try blocks.generateBlock(arena, .hr, "", 0, ""),
+            else => {
+                const text = switch (block.kind) {
+                    .table, .link, .image => try arena.dupe(u8, source),
+                    else => try blocks.stripKind(arena, block.kind, source),
+                };
+                replacement = try blocks.generateBlock(arena, target, text, if (target == .heading and block.level != 0) block.level else 2, if (target == .code) block.lang else "");
+            },
+        }
+        const new_body = try spliceBody(arena, note.body, block.start, block.end, replacement);
+        return submitNewBody(app, arena, ctx, note, version, new_body, block_idx);
+    }
+    return renderBlocksError(app, arena, ctx, note, null, "Unknown block operation.", .bad_request);
 }
 
 fn handlePin(app: *App, request: *http.Server.Request, arena: Allocator, ctx: views.Ctx, id: i64, content_type: ?[]const u8) !Response {
