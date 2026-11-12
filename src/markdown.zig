@@ -1,160 +1,327 @@
-//! Small, safe Markdown renderer.
+//! CommonMark/GFM rendering with safe embedded HTML.
 //!
-//! The output is HTML that FeatherNote generates itself. Source text is escaped
-//! before it is written, raw HTML is never passed through, and link/image URLs
-//! are restricted to http(s), mailto, and same-origin absolute paths.
+//! Pipeline:
+//!   1. Footnote preprocessing (`[^label]` definitions and references), which
+//!      MD4C does not implement natively.
+//!   2. MD4C 0.5.3 (vendored, MIT) with `MD_DIALECT_GITHUB`: tables, task
+//!      lists, strikethrough, permissive autolinks, XHTML output.
+//!   3. An allowlist HTML sanitizer over a real tag-tokenizer. MD4C passes raw
+//!      HTML from the note through, and emits link destinations verbatim, so
+//!      every byte of HTML output is sanitized, including crafted links,
+//!      nested tags, malformed fragments, and remote resources.
+//!
+//! The sanitizer never uses regular expressions. It tokenizes tags with an
+//! explicit element stack, drops comments, escapes disallowed tags as text,
+//! strips every non-allowlisted attribute (including all `on*` handlers and
+//! `style`), validates numeric/enumerated attributes, and applies the link
+//! policy below. `class` and `id` values are inert in HTML and are kept only
+//! after re-escaping. No `eval`-like construct exists in HTML output.
+//!
+//! Output is bounded: the note body is already capped at 256 KiB, element
+//! nesting is capped, and total output is capped. Any unexpected failure
+//! fails closed and renders the source as escaped text.
 const std = @import("std");
 const util = @import("http_util.zig");
+const md4c = @import("md4c");
 
+const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
-const max_depth: usize = 8;
+
+const max_depth: usize = 64;
+const max_output_bytes: usize = 4 * 1024 * 1024;
 
 pub fn render(w: *Writer, source: []const u8) !void {
-    var lines = std.mem.splitScalar(u8, source, '\n');
-    var paragraph_open = false;
-
-    while (lines.next()) |raw_line| {
-        const line = std.mem.trimEnd(u8, raw_line, "\r");
-        if (std.mem.trim(u8, line, " \t").len == 0) {
-            try closeParagraph(w, &paragraph_open);
-            continue;
-        }
-        if (std.mem.startsWith(u8, line, "```")) {
-            try closeParagraph(w, &paragraph_open);
-            try renderFence(w, &lines, line[3..]);
-            continue;
-        }
-        if (isIndented(line)) {
-            try closeParagraph(w, &paragraph_open);
-            try w.writeAll("<pre><code>");
-            var current = line;
-            var first = true;
-            while (true) {
-                if (!first) try w.writeByte('\n');
-                try util.escapeHtml(w, stripIndent(current));
-                first = false;
-                const peek_raw = lines.peek() orelse break;
-                const next = std.mem.trimEnd(u8, peek_raw, "\r");
-                if (!isIndented(next)) break;
-                _ = lines.next();
-                current = next;
-            }
-            try w.writeAll("</code></pre>\n");
-            continue;
-        }
-        if (headingLevel(line)) |level| {
-            try closeParagraph(w, &paragraph_open);
-            try w.print("<h{d}>", .{level});
-            try renderInline(w, line[level + 1 ..], 0);
-            try w.print("</h{d}>\n", .{level});
-            continue;
-        }
-        if (isRule(line)) {
-            try closeParagraph(w, &paragraph_open);
-            try w.writeAll("<hr>\n");
-            continue;
-        }
-        if (std.mem.startsWith(u8, line, ">")) {
-            try closeParagraph(w, &paragraph_open);
-            try w.writeAll("<blockquote><p>");
-            try renderInline(w, std.mem.trimStart(u8, line[1..], " "), 0);
-            while (lines.peek()) |next_raw| {
-                const next = std.mem.trimEnd(u8, next_raw, "\r");
-                if (!std.mem.startsWith(u8, next, ">")) break;
-                _ = lines.next();
-                try w.writeAll("<br>\n");
-                try renderInline(w, std.mem.trimStart(u8, next[1..], " "), 0);
-            }
-            try w.writeAll("</p></blockquote>\n");
-            continue;
-        }
-        if (listItem(line)) |item| {
-            try closeParagraph(w, &paragraph_open);
-            try renderList(w, &lines, item);
-            continue;
-        }
-        if (!paragraph_open) {
-            try w.writeAll("<p>");
-            paragraph_open = true;
-        } else {
-            try w.writeAll("<br>\n");
-        }
-        try renderInline(w, line, 0);
-    }
-    try closeParagraph(w, &paragraph_open);
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    try renderWithAlloc(arena_state.allocator(), w, source);
 }
 
-fn closeParagraph(w: *Writer, open: *bool) !void {
-    if (!open.*) return;
-    try w.writeAll("</p>\n");
-    open.* = false;
+pub fn renderWithAlloc(alloc: Allocator, w: *Writer, source: []const u8) !void {
+    // All intermediates live in a child arena so callers (including tests
+    // with leak checking) see one allocation boundary for the whole render.
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const inner = arena_state.allocator();
+    const footnote_state = try expandFootnotes(inner, source);
+    var combined = md4cToHtmlAlloc(inner, footnote_state.cleaned) catch {
+        try writeEscapedFallback(w, source);
+        return;
+    };
+    if (footnote_state.entries.len > 0) {
+        combined = try appendFootnoteSectionAlloc(inner, combined, footnote_state);
+        combined = try replaceFootnoteTokens(inner, combined, footnote_state.entries.len);
+    }
+    try sanitize(w, inner, combined);
 }
 
-const ListItem = struct { ordered: bool, text: []const u8 };
+fn md4cToHtmlAlloc(alloc: Allocator, source: []const u8) ![]u8 {
+    var out_ptr: [*c]u8 = undefined;
+    var out_size: usize = 0;
+    const rc = md4c.fn_md_render(source.ptr, source.len, &out_ptr, &out_size);
+    if (rc != 0) return error.MdRenderFailed;
+    defer md4c.fn_md_free(out_ptr);
+    return try alloc.dupe(u8, out_ptr[0..out_size]);
+}
 
-fn listItem(line: []const u8) ?ListItem {
-    if (line.len >= 2 and (line[0] == '-' or line[0] == '*' or line[0] == '+') and line[1] == ' ') {
-        return .{ .ordered = false, .text = line[2..] };
+fn appendFootnoteSectionAlloc(alloc: Allocator, main_html: []const u8, state: FootnoteState) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.appendSlice(alloc, main_html);
+    try buf.appendSlice(alloc, "<section class=\"footnotes\"><hr><ol>\n");
+    for (state.entries, 0..) |entry, idx| {
+        var num: [24]u8 = undefined;
+        const n = try std.fmt.bufPrint(&num, "{d}", .{entry.number});
+        try buf.appendSlice(alloc, "<li id=\"fn-");
+        try buf.appendSlice(alloc, n);
+        try buf.appendSlice(alloc, "\">");
+        if (idx < state.rendered.len) try buf.appendSlice(alloc, state.rendered[idx]);
+        try buf.appendSlice(alloc, " <a href=\"#fn-ref-");
+        try buf.appendSlice(alloc, n);
+        try buf.appendSlice(alloc, "\" class=\"footnote-backref\">\u{21a9}</a></li>\n");
     }
+    try buf.appendSlice(alloc, "</ol></section>\n");
+    return try buf.toOwnedSlice(alloc);
+}
+
+fn replaceFootnoteTokens(alloc: Allocator, html: []const u8, entry_count: usize) ![]u8 {
+    if (std.mem.indexOf(u8, html, "@@FNREF:") == null) return try alloc.dupe(u8, html);
+    var buf: std.ArrayList(u8) = .empty;
     var i: usize = 0;
-    while (i < line.len and std.ascii.isDigit(line[i])) : (i += 1) {}
-    if (i > 0 and i + 1 < line.len and line[i] == '.' and line[i + 1] == ' ') {
-        return .{ .ordered = true, .text = line[i + 2 ..] };
+    while (i < html.len) {
+        if (std.mem.startsWith(u8, html[i..], "@@FNREF:")) {
+            if (std.mem.indexOf(u8, html[i + 8 ..], "@@")) |rel| {
+                const num_text = html[i + 8 .. i + 8 + rel];
+                const num = std.fmt.parseInt(usize, num_text, 10) catch 0;
+                if (num >= 1 and num <= entry_count) {
+                    var num_buf: [24]u8 = undefined;
+                    const n = try std.fmt.bufPrint(&num_buf, "{d}", .{num});
+                    try buf.appendSlice(alloc, "<sup class=\"footnote-ref\"><a href=\"#fn-");
+                    try buf.appendSlice(alloc, n);
+                    try buf.appendSlice(alloc, "\" id=\"fn-ref-");
+                    try buf.appendSlice(alloc, n);
+                    try buf.appendSlice(alloc, "\">");
+                    try buf.appendSlice(alloc, n);
+                    try buf.appendSlice(alloc, "</a></sup>");
+                    i += 8 + rel + 2;
+                    continue;
+                }
+            }
+        }
+        try buf.append(alloc, html[i]);
+        i += 1;
     }
-    return null;
+    return try buf.toOwnedSlice(alloc);
 }
 
-fn renderList(w: *Writer, lines: *std.mem.SplitIterator(u8, .scalar), first: ListItem) !void {
-    const tag: []const u8 = if (first.ordered) "ol" else "ul";
-    try w.print("<{s}>\n", .{tag});
-    try w.writeAll("<li>");
-    try renderInline(w, first.text, 0);
-    try w.writeAll("</li>\n");
-    while (lines.peek()) |peek_raw| {
-        const peek = std.mem.trimEnd(u8, peek_raw, "\r");
-        const item = listItem(peek) orelse break;
-        if (item.ordered != first.ordered) break;
-        _ = lines.next();
-        try w.writeAll("<li>");
-        try renderInline(w, item.text, 0);
-        try w.writeAll("</li>\n");
-    }
-    try w.print("</{s}>\n", .{tag});
+fn writeEscapedFallback(w: *Writer, source: []const u8) !void {
+    if (source.len == 0) return;
+    try w.writeAll("<p>");
+    try util.escapeHtml(w, source);
+    try w.writeAll("</p>\n");
 }
 
-fn renderFence(w: *Writer, lines: *std.mem.SplitIterator(u8, .scalar), info: []const u8) !void {
-    const lang = std.mem.trim(u8, info, " \t");
-    if (lang.len > 0) {
-        try w.writeAll("<pre><code class=\"language-");
-        try writeSafeClass(w, lang);
-        try w.writeAll("\">");
-    } else {
-        try w.writeAll("<pre><code>");
-    }
-    var first = true;
-    while (lines.next()) |raw| {
-        const line = std.mem.trimEnd(u8, raw, "\r");
-        if (std.mem.eql(u8, std.mem.trim(u8, line, " \t"), "```")) break;
-        if (!first) try w.writeByte('\n');
-        try util.escapeHtml(w, line);
-        first = false;
-    }
-    try w.writeAll("</code></pre>\n");
+// ---------------------------------------------------------------- footnotes
+
+const FootnoteDef = struct {
+    label: []const u8,
+    text: []const u8,
+    number: usize = 0, // 0 means not referenced yet
+};
+
+const FootnoteState = struct {
+    cleaned: []const u8,
+    entries: []FootnoteDef,
+    // Rendered definitions (MD4C output for each referenced definition).
+    rendered: [][]const u8,
+};
+
+fn isLabelChar(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_';
 }
 
-fn writeSafeClass(w: *Writer, lang: []const u8) !void {
-    for (lang) |ch| {
-        if (std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '+') {
-            try w.writeByte(ch);
+fn parseFootnoteDefStart(line: []const u8) ?[]const u8 {
+    // Up to three spaces of indentation, then `[^label]:`.
+    var i: usize = 0;
+    while (i < line.len and line[i] == ' ' and i < 3) : (i += 1) {}
+    if (i + 2 > line.len or line[i] != '[' or line[i + 1] != '^') return null;
+    var j = i + 2;
+    while (j < line.len and isLabelChar(line[j])) : (j += 1) {}
+    if (j == i + 2 or j + 1 >= line.len or line[j] != ']' or line[j + 1] != ':') return null;
+    return line[i + 2 .. j];
+}
+
+const Fence = struct { ch: u8, n: usize };
+
+fn fenceMarker(line: []const u8) ?Fence {
+    var i: usize = 0;
+    while (i < line.len and line[i] == ' ' and i < 3) : (i += 1) {}
+    if (i >= line.len or (line[i] != '`' and line[i] != '~')) return null;
+    var n: usize = 0;
+    while (i + n < line.len and line[i + n] == line[i]) : (n += 1) {}
+    if (n < 3) return null;
+    return .{ .ch = line[i], .n = n };
+}
+
+fn expandFootnotes(alloc: Allocator, source: []const u8) !FootnoteState {
+    if (std.mem.indexOfScalar(u8, source, '[') == null) {
+        return .{ .cleaned = source, .entries = &.{}, .rendered = &.{} };
+    }
+    var defs: std.ArrayList(FootnoteDef) = .empty;
+    var cleaned: std.ArrayList(u8) = .empty;
+    var in_fence: ?Fence = null;
+    var it = std.mem.splitScalar(u8, source, '\n');
+    while (it.next()) |raw_line| {
+        const line = raw_line;
+        const trimmed_end = std.mem.trimEnd(u8, line, "\r");
+        if (in_fence) |f| {
+            try cleaned.appendSlice(alloc, line);
+            try cleaned.append(alloc, '\n');
+            if (fenceMarker(trimmed_end)) |m| {
+                if (m.ch == f.ch and m.n >= f.n) in_fence = null;
+            }
+            continue;
+        }
+        if (fenceMarker(trimmed_end)) |m| {
+            in_fence = m;
+            try cleaned.appendSlice(alloc, line);
+            try cleaned.append(alloc, '\n');
+            continue;
+        }
+        if (parseFootnoteDefStart(trimmed_end)) |label| {
+            const start = std.mem.indexOf(u8, trimmed_end, label).?;
+            const after_colon = start + label.len + 2; // label, ']', ':'
+            var buf: std.ArrayList(u8) = .empty;
+            try buf.appendSlice(alloc, std.mem.trimStart(u8, trimmed_end[after_colon..], " \t"));
+            // Continuation lines indented by 4 spaces or a tab belong to the
+            // definition (commonmark footnote convention). Peek next lines.
+            while (it.peek()) |peek_raw| {
+                if (isIndented(peek_raw)) {
+                    _ = it.next();
+                    try buf.append(alloc, '\n');
+                    try buf.appendSlice(alloc, stripIndent(peek_raw));
+                } else break;
+            }
+            try defs.append(alloc, .{
+                .label = try alloc.dupe(u8, label),
+                .text = try buf.toOwnedSlice(alloc),
+            });
+            continue;
+        }
+        try cleaned.appendSlice(alloc, line);
+        try cleaned.append(alloc, '\n');
+    }
+    if (defs.items.len == 0) {
+        return .{ .cleaned = source, .entries = &.{}, .rendered = &.{} };
+    }
+    // Replace `[^label]` references (outside fenced code) with text tokens.
+    const token_prefix = "@@FNREF:";
+    var out: std.ArrayList(u8) = .empty;
+    in_fence = null;
+    var lit = std.mem.splitScalar(u8, cleaned.items, '\n');
+    var first_line = true;
+    while (lit.next()) |line| {
+        if (!first_line) try out.append(alloc, '\n');
+        first_line = false;
+        if (in_fence) |f| {
+            try out.appendSlice(alloc, line);
+            if (fenceMarker(std.mem.trimEnd(u8, line, "\r"))) |m| {
+                if (m.ch == f.ch and m.n >= f.n) in_fence = null;
+            }
+            continue;
+        }
+        if (fenceMarker(std.mem.trimEnd(u8, line, "\r"))) |m| {
+            in_fence = m;
+            try out.appendSlice(alloc, line);
+            continue;
+        }
+        var i: usize = 0;
+        while (i < line.len) {
+            const ch = line[i];
+            if (ch == '`') {
+                // Copy inline code spans verbatim so footnote-like text
+                // inside code is never rewritten.
+                var run: usize = 0;
+                while (i + run < line.len and line[i + run] == '`') : (run += 1) {}
+                var j = i + run;
+                var done = false;
+                while (j < line.len) {
+                    if (line[j] != '`') {
+                        j += 1;
+                        continue;
+                    }
+                    var close: usize = 0;
+                    while (j + close < line.len and line[j + close] == '`') : (close += 1) {}
+                    if (close == run) {
+                        try out.appendSlice(alloc, line[i .. j + run]);
+                        i = j + run;
+                        done = true;
+                        break;
+                    }
+                    j += close;
+                }
+                if (!done) {
+                    try out.appendSlice(alloc, line[i..]);
+                    i = line.len;
+                }
+                continue;
+            }
+            if (ch == '[' and i + 1 < line.len and line[i + 1] == '^') {
+                var j = i + 2;
+                while (j < line.len and isLabelChar(line[j])) : (j += 1) {}
+                if (j > i + 2 and j < line.len and line[j] == ']') {
+                    const label = line[i + 2 .. j];
+                    var found: ?*FootnoteDef = null;
+                    for (defs.items) |*d| {
+                        if (std.mem.eql(u8, d.label, label)) {
+                            found = d;
+                            break;
+                        }
+                    }
+                    if (found) |d| {
+                        if (d.number == 0) {
+                            var count: usize = 0;
+                            for (defs.items) |def| {
+                                if (def.number != 0) count += 1;
+                            }
+                            d.number = count + 1;
+                        }
+                        if (d.number != 0) {
+                            var tok: [48]u8 = undefined;
+                            try out.appendSlice(alloc, token_prefix);
+                            try out.appendSlice(alloc, try std.fmt.bufPrint(&tok, "{d}", .{d.number}));
+                            try out.appendSlice(alloc, "@@");
+                            i = j + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+            try out.append(alloc, ch);
+            i += 1;
         }
     }
-}
-
-fn headingLevel(line: []const u8) ?usize {
-    var level: usize = 0;
-    while (level < line.len and line[level] == '#') : (level += 1) {}
-    if (level == 0 or level > 6 or level >= line.len or line[level] != ' ') return null;
-    return level;
+    // Renumber by first-reference order (already assigned above), keep only
+    // referenced definitions, in reference order.
+    var referenced: std.ArrayList(FootnoteDef) = .empty;
+    var max_n: usize = 0;
+    for (defs.items) |d| {
+        if (d.number > max_n) max_n = d.number;
+    }
+    var rendered: std.ArrayList([]const u8) = .empty;
+    var n: usize = 1;
+    while (n <= max_n) : (n += 1) {
+        for (defs.items) |d| {
+            if (d.number == n) {
+                try referenced.append(alloc, d);
+                try rendered.append(alloc, md4cToHtmlAlloc(alloc, d.text) catch "");
+                break;
+            }
+        }
+    }
+    return .{
+        .cleaned = try out.toOwnedSlice(alloc),
+        .entries = try referenced.toOwnedSlice(alloc),
+        .rendered = try rendered.toOwnedSlice(alloc),
+    };
 }
 
 fn isIndented(line: []const u8) bool {
@@ -168,241 +335,594 @@ fn stripIndent(line: []const u8) []const u8 {
     return line;
 }
 
-fn isRule(line: []const u8) bool {
-    const trimmed = std.mem.trim(u8, line, " \t");
-    if (trimmed.len < 3) return false;
-    var count: usize = 0;
-    var marker: ?u8 = null;
-    for (trimmed) |ch| {
-        if (ch == ' ' or ch == '\t') continue;
-        if (marker == null) {
-            if (ch != '-' and ch != '*' and ch != '_') return false;
-            marker = ch;
-        }
-        if (ch != marker.?) return false;
-        count += 1;
+// ---------------------------------------------------------------- sanitizer
+
+const TagKind = enum { allow, drop_content, void_elem };
+
+fn tagKind(name: []const u8) TagKind {
+    if (std.mem.eql(u8, name, "br") or std.mem.eql(u8, name, "hr") or
+        std.mem.eql(u8, name, "img") or std.mem.eql(u8, name, "input"))
+    {
+        return .void_elem;
     }
-    return count >= 3;
+    if (std.mem.eql(u8, name, "script") or std.mem.eql(u8, name, "style") or
+        std.mem.eql(u8, name, "iframe") or std.mem.eql(u8, name, "object") or
+        std.mem.eql(u8, name, "embed") or std.mem.eql(u8, name, "link") or
+        std.mem.eql(u8, name, "meta") or std.mem.eql(u8, name, "base") or
+        std.mem.eql(u8, name, "svg") or std.mem.eql(u8, name, "math") or
+        std.mem.eql(u8, name, "title") or std.mem.eql(u8, name, "head"))
+    {
+        return .drop_content;
+    }
+    if (allowedTag(name)) return .allow;
+    return .drop_content;
 }
 
-fn renderInline(w: *Writer, text: []const u8, depth: usize) anyerror!void {
-    if (depth > max_depth) {
-        try util.escapeHtml(w, text);
-        return;
+fn allowedTag(name: []const u8) bool {
+    const allowed = [_][]const u8{
+        "p", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6",
+        "strong", "em", "del", "code", "pre", "blockquote",
+        "ul", "ol", "li", "table", "thead", "tbody", "tfoot", "tr", "th", "td",
+        "a", "img", "details", "summary", "mark", "kbd", "sup", "sub",
+        "div", "span", "section", "input", "dl", "dt", "dd", "figure", "figcaption",
+    };
+    for (allowed) |t| {
+        if (std.mem.eql(u8, name, t)) return true;
     }
+    return false;
+}
+
+const Attr = struct { name: []const u8, value: []const u8, has_value: bool };
+
+fn isAttrNameChar(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == ':' or ch == '.';
+}
+
+fn isNameChar(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '-';
+}
+
+fn sanitize(w: *Writer, alloc: Allocator, html: []const u8) !void {
+    var stack: [max_depth][]const u8 = undefined;
+    var depth: usize = 0;
+    var written: usize = 0;
+    var i: usize = 0;
+
+    const out = struct {
+        fn put(ww: *Writer, n: *usize, s: []const u8) !void {
+            try ww.writeAll(s);
+            n.* +|= s.len;
+        }
+    };
+
+    while (i < html.len) {
+        if (written > max_output_bytes) break;
+        const ch = html[i];
+        if (ch != '<') {
+            // Text run until the next '<'. Valid entities pass through;
+            // a bare '&' is escaped so it cannot smuggle an entity.
+            const start = i;
+            while (i < html.len and html[i] != '<') : (i += 1) {}
+            try writeSafeText(w, html[start..i]);
+            written += i - start + 8;
+            continue;
+        }
+        // Comments are dropped entirely.
+        if (std.mem.startsWith(u8, html[i..], "<!--")) {
+            if (std.mem.indexOf(u8, html[i + 4 ..], "-->")) |end| {
+                i = i + 4 + end + 3;
+            } else break;
+            continue;
+        }
+        if (i + 1 < html.len and (html[i + 1] == '!' or html[i + 1] == '?')) {
+            // Doctype / processing-instruction style declarations: drop.
+            if (std.mem.indexOfScalar(u8, html[i..], '>')) |end| {
+                i += end + 1;
+                continue;
+            }
+            break;
+        }
+        var p = i + 1;
+        const closing = p < html.len and html[p] == '/';
+        if (closing) p += 1;
+        if (p >= html.len or !isAsciiAlpha(html[p])) {
+            try w.writeAll("&lt;");
+            i += 1;
+            continue;
+        }
+        const name_start = p;
+        while (p < html.len and isNameChar(html[p])) : (p += 1) {}
+        var name_buf: [32]u8 = undefined;
+        const raw_name = html[name_start..p];
+        if (raw_name.len >= name_buf.len) {
+            // Over-long tag names cannot be allowlisted. Escape the tag.
+            if (std.mem.indexOfScalar(u8, html[i..], '>')) |end| {
+                try util.escapeHtml(w, html[i .. i + end + 1]);
+                i += end + 1;
+                continue;
+            }
+            break;
+        }
+        const name = std.ascii.lowerString(&name_buf, raw_name);
+        // Parse attributes until '>' or '/>'.
+        var attrs: [24]Attr = undefined;
+        var attr_count: usize = 0;
+        var self_closing = false;
+        var saw_gt = false;
+        var q = p;
+        while (q < html.len) {
+            while (q < html.len and isSpace(html[q])) : (q += 1) {}
+            if (q >= html.len) break;
+            if (html[q] == '>' or (html[q] == '/' and q + 1 < html.len and html[q + 1] == '>')) {
+                self_closing = html[q] == '/' and q + 1 < html.len and html[q + 1] == '>';
+                saw_gt = true;
+                q += if (self_closing) 2 else 1;
+                break;
+            }
+            if (!isAttrNameChar(html[q])) {
+                q += 1; // stray character in the tag; skip it
+                continue;
+            }
+            const astart = q;
+            while (q < html.len and isAttrNameChar(html[q])) : (q += 1) {}
+            const aname = html[astart..q];
+            while (q < html.len and isSpace(html[q])) : (q += 1) {}
+            var value: []const u8 = "";
+            var has_value = false;
+            if (q < html.len and html[q] == '=') {
+                q += 1;
+                while (q < html.len and isSpace(html[q])) : (q += 1) {}
+                if (q < html.len and (html[q] == '"' or html[q] == '\'')) {
+                    const quote = html[q];
+                    q += 1;
+                    const vs = q;
+                    while (q < html.len and html[q] != quote) : (q += 1) {}
+                    value = html[vs..q];
+                    has_value = true;
+                    if (q < html.len) q += 1;
+                } else {
+                    const vs = q;
+                    while (q < html.len and !isSpace(html[q]) and html[q] != '>') : (q += 1) {}
+                    value = html[vs..q];
+                    has_value = true;
+                }
+            }
+            if (attr_count < attrs.len) {
+                attrs[attr_count] = .{ .name = aname, .value = value, .has_value = has_value };
+                attr_count += 1;
+            }
+        }
+        if (!saw_gt) break; // unterminated tag: drop the rest
+        const tag_slice = html[i..q];
+        i = q;
+
+        if (closing) {
+            // Close only to the matching open element on the stack.
+            var idx: ?usize = null;
+            var s: usize = depth;
+            while (s > 0) {
+                s -= 1;
+                if (std.mem.eql(u8, stack[s], name)) {
+                    idx = s;
+                    break;
+                }
+            }
+            if (idx) |at| {
+                while (depth > at) {
+                    depth -= 1;
+                    try out.put(w, &written, "</");
+                    try out.put(w, &written, stack[depth]);
+                    try out.put(w, &written, ">");
+                }
+            } else if (allowedTag(name) and tagKind(name) == .allow) {
+                // Stray closer for an allowed, non-void tag: ignore it.
+            } else {
+                try util.escapeHtml(w, tag_slice);
+            }
+            continue;
+        }
+
+        switch (tagKind(name)) {
+            .void_elem => {
+                try writeAllowedTag(w, alloc, name, attrs[0..attr_count]);
+            },
+            .drop_content => {
+                // Fail closed: show the markup as text, never as an element.
+                // Content between the tags is processed as ordinary text, so
+                // nothing inside can become an element except allowlisted
+                // markup - which the stack logic still sanitizes.
+                try util.escapeHtml(w, tag_slice);
+            },
+            .allow => {
+                if (depth >= max_depth) {
+                    try util.escapeHtml(w, tag_slice);
+                    continue;
+                }
+                try writeAllowedTag(w, alloc, name, attrs[0..attr_count]);
+                if (!self_closing) {
+                    stack[depth] = name;
+                    depth += 1;
+                }
+            },
+        }
+    }
+    while (depth > 0) {
+        depth -= 1;
+        try w.writeAll("</");
+        try w.writeAll(stack[depth]);
+        try w.writeAll(">");
+    }
+}
+
+fn isAsciiAlpha(ch: u8) bool {
+    return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z');
+}
+
+fn isSpace(ch: u8) bool {
+    return ch == ' ' or ch == '\t' or ch == '\n' or ch == '\r' or ch == '\x0c';
+}
+
+fn writeSafeText(w: *Writer, text: []const u8) !void {
     var i: usize = 0;
     while (i < text.len) {
         const ch = text[i];
-        if (ch == '\\' and i + 1 < text.len) {
-            try util.escapeHtml(w, text[i + 1 .. i + 2]);
-            i += 2;
+        if (ch == '&') {
+            if (validEntity(text, i)) |len| {
+                try w.writeAll(text[i .. i + len]);
+                i += len;
+                continue;
+            }
+            try w.writeAll("&amp;");
+            i += 1;
             continue;
         }
-        if (ch == '`') {
-            if (try renderCodeSpan(w, text, &i)) continue;
+        if (ch == '<') {
+            try w.writeAll("&lt;");
+            i += 1;
+            continue;
         }
-        if (ch == '!' and i + 1 < text.len and text[i + 1] == '[') {
-            if (try renderImage(w, text, &i)) continue;
+        if (ch == '>') {
+            try w.writeAll("&gt;");
+            i += 1;
+            continue;
         }
-        if (ch == '[') {
-            if (try renderLink(w, text, &i, depth)) continue;
-        }
-        if (ch == '*' or ch == '_' or ch == '~') {
-            if (try renderEmphasis(w, text, &i, depth)) continue;
-        }
-        try util.escapeHtml(w, text[i .. i + 1]);
+        try w.writeByte(ch);
         i += 1;
     }
 }
 
-fn renderCodeSpan(w: *Writer, text: []const u8, i: *usize) anyerror!bool {
-    var run: usize = 0;
-    while (i.* + run < text.len and text[i.* + run] == '`') : (run += 1) {}
-    if (run == 0) return false;
-    const content_start = i.* + run;
-    var j = content_start;
-    while (j < text.len) {
-        if (text[j] != '`') {
+fn validEntity(text: []const u8, at: usize) ?usize {
+    // `&name;`, `&#123;`, or `&#x1F;`. The name itself is not restricted
+    // because unknown entities render as literal text in browsers.
+    var j = at + 1;
+    if (j >= text.len) return null;
+    if (text[j] == '#') {
+        j += 1;
+        if (j < text.len and (text[j] == 'x' or text[j] == 'X')) {
             j += 1;
-            continue;
+            const start = j;
+            while (j < text.len and hexVal(text[j]) != null) : (j += 1) {}
+            if (j > start and j < text.len and text[j] == ';') return j - at + 1;
+            return null;
         }
-        var close_run: usize = 0;
-        while (j + close_run < text.len and text[j + close_run] == '`') : (close_run += 1) {}
-        if (close_run == run) {
-            try w.writeAll("<code>");
-            try util.escapeHtml(w, text[content_start..j]);
-            try w.writeAll("</code>");
-            i.* = j + run;
+        const start = j;
+        while (j < text.len and std.ascii.isDigit(text[j])) : (j += 1) {}
+        if (j > start and j < text.len and text[j] == ';') return j - at + 1;
+        return null;
+    }
+    const start = j;
+    while (j < text.len and std.ascii.isAlphanumeric(text[j])) : (j += 1) {}
+    if (j > start and j - start <= 32 and j < text.len and text[j] == ';') return j - at + 1;
+    return null;
+}
+
+fn hexVal(ch: u8) ?u8 {
+    return switch (ch) {
+        '0'...'9' => ch - '0',
+        'a'...'f' => ch - 'a' + 10,
+        'A'...'F' => ch - 'A' + 10,
+        else => null,
+    };
+}
+
+fn writeAllowedTag(w: *Writer, alloc: Allocator, name: []const u8, attrs: []const Attr) !void {
+    // Checkboxes are the only <input> allowed (GFM task lists).
+    if (std.mem.eql(u8, name, "input")) {
+        var type_ok = false;
+        var any_checked = false;
+        for (attrs) |a| {
+            if (std.ascii.eqlIgnoreCase(a.name, "type") and std.ascii.eqlIgnoreCase(a.value, "checkbox")) {
+                type_ok = true;
+            }
+            if (std.ascii.eqlIgnoreCase(a.name, "checked")) any_checked = true;
+        }
+        if (!type_ok) return; // drop non-checkbox inputs silently
+        try w.writeAll("<input type=\"checkbox\" class=\"task-list-item-checkbox\" disabled");
+        if (any_checked) try w.writeAll(" checked");
+        try w.writeAll(">");
+        return;
+    }
+    try w.writeByte('<');
+    try w.writeAll(name);
+    for (attrs) |a| {
+        if (try writeAttr(w, alloc, name, a)) continue;
+    }
+    switch (tagKind(name)) {
+        .void_elem => try w.writeAll(" />"),
+        else => try w.writeAll(">"),
+    }
+}
+
+fn writeAttr(w: *Writer, alloc: Allocator, tag: []const u8, a: Attr) !bool {
+    if (std.ascii.eqlIgnoreCase(a.name, "href")) {
+        if (!std.mem.eql(u8, tag, "a")) return false;
+        const clean = decodeAttrEntities(alloc, a.value) catch return false;
+        if (!safeHref(alloc, clean)) return false;
+        try w.writeAll(" href=\"");
+        try util.escapeHtml(w, clean);
+        try w.writeAll("\"");
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(a.name, "src")) {
+        if (!std.mem.eql(u8, tag, "img")) return false;
+        const clean = decodeAttrEntities(alloc, a.value) catch return false;
+        if (!safeImgSrc(alloc, clean)) return false;
+        try w.writeAll(" src=\"");
+        try util.escapeHtml(w, clean);
+        try w.writeAll("\"");
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(a.name, "alt") or std.ascii.eqlIgnoreCase(a.name, "title")) {
+        try w.writeAll(" ");
+        try w.writeAll(a.name);
+        try w.writeAll("=\"");
+        try util.escapeHtml(w, a.value);
+        try w.writeAll("\"");
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(a.name, "align")) {
+        const v = a.value;
+        if (std.mem.eql(u8, v, "left") or std.mem.eql(u8, v, "center") or std.mem.eql(u8, v, "right")) {
+            try w.writeAll(" align=\"");
+            try w.writeAll(v);
+            try w.writeAll("\"");
             return true;
         }
-        j += close_run;
+        return false;
+    }
+    if (std.ascii.eqlIgnoreCase(a.name, "colspan") or std.ascii.eqlIgnoreCase(a.name, "rowspan") or
+        std.ascii.eqlIgnoreCase(a.name, "start"))
+    {
+        if (!isDigits(a.value) or a.value.len == 0) return false;
+        try w.writeAll(" ");
+        try w.writeAll(a.name);
+        try w.writeAll("=\"");
+        try w.writeAll(a.value);
+        try w.writeAll("\"");
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(a.name, "scope")) {
+        if (std.mem.eql(u8, a.value, "col") or std.mem.eql(u8, a.value, "row")) {
+            try w.writeAll(" scope=\"");
+            try w.writeAll(a.value);
+            try w.writeAll("\"");
+            return true;
+        }
+        return false;
+    }
+    if (std.ascii.eqlIgnoreCase(a.name, "open")) {
+        if (std.mem.eql(u8, tag, "details")) {
+            try w.writeAll(" open");
+            return true;
+        }
+        return false;
+    }
+    if (std.ascii.eqlIgnoreCase(a.name, "class")) {
+        // Class names are inert. Re-escape the value; CSS cannot execute.
+        try w.writeAll(" class=\"");
+        try util.escapeHtml(w, a.value);
+        try w.writeAll("\"");
+        return true;
+    }
+    if (std.ascii.eqlIgnoreCase(a.name, "id")) {
+        try w.writeAll(" id=\"");
+        try util.escapeHtml(w, a.value);
+        try w.writeAll("\"");
+        return true;
     }
     return false;
 }
 
-fn renderEmphasis(w: *Writer, text: []const u8, i: *usize, depth: usize) anyerror!bool {
-    const marker = text[i.*];
-    const start = i.*;
-    if (marker == '_' and start > 0 and isWordChar(text[start - 1])) return false;
-    var run: usize = 0;
-    while (start + run < text.len and text[start + run] == marker) : (run += 1) {}
-    const double = run >= 2;
-    if (marker == '~' and !double) return false;
-    const width: usize = if (double) 2 else 1;
-    const content_start = start + width;
-    if (content_start >= text.len) return false;
-    var j = content_start;
-    while (j < text.len) {
-        if (text[j] == '\\') {
-            j += 2;
-            continue;
-        }
-        if (text[j] != marker) {
-            j += 1;
-            continue;
-        }
-        var close_run: usize = 0;
-        while (j + close_run < text.len and text[j + close_run] == marker) : (close_run += 1) {}
-        const enough = if (double) close_run >= 2 else close_run == 1;
-        const end_ok = j + width <= text.len;
-        const boundary_ok = !(marker == '_' and j + width < text.len and isWordChar(text[j + width]));
-        if (enough and end_ok and boundary_ok) {
-            const tag_open: []const u8 = switch (marker) {
-                '~' => "<del>",
-                else => if (double) "<strong>" else "<em>",
-            };
-            const tag_close: []const u8 = switch (marker) {
-                '~' => "</del>",
-                else => if (double) "</strong>" else "</em>",
-            };
-            try w.writeAll(tag_open);
-            try renderInline(w, text[content_start..j], depth + 1);
-            try w.writeAll(tag_close);
-            i.* = j + width;
-            return true;
-        }
-        j += close_run;
+fn isDigits(text: []const u8) bool {
+    for (text) |ch| {
+        if (!std.ascii.isDigit(ch)) return false;
     }
-    return false;
-}
-
-fn renderLink(w: *Writer, text: []const u8, i: *usize, depth: usize) anyerror!bool {
-    const start = i.*;
-    const close_bracket = std.mem.findScalarPos(u8, text, start + 1, ']') orelse return false;
-    if (close_bracket + 1 >= text.len or text[close_bracket + 1] != '(') return false;
-    const close_paren = std.mem.findScalarPos(u8, text, close_bracket + 2, ')') orelse return false;
-    const label = text[start + 1 .. close_bracket];
-    const url = text[close_bracket + 2 .. close_paren];
-    if (!safeUrl(url, false)) return false;
-    try w.writeAll("<a href=\"");
-    try util.escapeHtml(w, url);
-    try w.writeAll("\" rel=\"nofollow noopener\">");
-    try renderInline(w, label, depth + 1);
-    try w.writeAll("</a>");
-    i.* = close_paren + 1;
     return true;
 }
 
-fn renderImage(w: *Writer, text: []const u8, i: *usize) anyerror!bool {
-    const start = i.*;
-    const close_bracket = std.mem.findScalarPos(u8, text, start + 2, ']') orelse return false;
-    if (close_bracket + 1 >= text.len or text[close_bracket + 1] != '(') return false;
-    const close_paren = std.mem.findScalarPos(u8, text, close_bracket + 2, ')') orelse return false;
-    const alt = text[start + 2 .. close_bracket];
-    const url = text[close_bracket + 2 .. close_paren];
-    if (!safeUrl(url, true)) return false;
-    try w.writeAll("<img src=\"");
-    try util.escapeHtml(w, url);
-    try w.writeAll("\" alt=\"");
-    try util.escapeHtml(w, alt);
-    try w.writeAll("\" loading=\"lazy\" decoding=\"async\">");
-    i.* = close_paren + 1;
+// Decode HTML entities in an attribute value so scheme checks cannot be
+// bypassed with `&#106;avascript:` and friends.
+fn decodeAttrEntities(alloc: Allocator, value: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, value, '&') == null) return value;
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < value.len) {
+        if (value[i] != '&') {
+            try out.append(alloc, value[i]);
+            i += 1;
+            continue;
+        }
+        if (validEntity(value, i)) |len| {
+            const entity = value[i + 1 .. i + len - 1]; // without & and ;
+            if (entity.len > 0 and entity[0] == '#') {
+                var cp: u21 = 0;
+                if (entity.len > 1 and (entity[1] == 'x' or entity[1] == 'X')) {
+                    cp = std.fmt.parseInt(u21, entity[2..], 16) catch 0;
+                } else {
+                    cp = std.fmt.parseInt(u21, entity[1..], 10) catch 0;
+                }
+                var utf: [4]u8 = undefined;
+                if (cp == 0) {
+                    try out.append(alloc, '?');
+                } else if (std.unicode.utf8Encode(cp, &utf) catch null) |n| {
+                    try out.appendSlice(alloc, utf[0..n]);
+                } else {
+                    try out.append(alloc, '?');
+                }
+            } else {
+                try appendNamedEntity(alloc, &out, entity);
+            }
+            i += len;
+            continue;
+        }
+        try out.append(alloc, value[i]);
+        i += 1;
+    }
+    const snap = try out.toOwnedSlice(alloc);
+    return snap;
+}
+
+fn appendNamedEntity(alloc: Allocator, out: *std.ArrayList(u8), name: []const u8) !void {
+    const table = [_]struct { []const u8, []const u8 }{
+        .{ "amp", "&" }, .{ "lt", "<" }, .{ "gt", ">" }, .{ "quot", "\"" },
+        .{ "apos", "'" }, .{ "colon", ":" }, .{ "sol", "/" }, .{ "comma", "," },
+        .{ "period", "." },   .{ "tab", "\t" }, .{ "NewLine", "\n" },
+        .{ "nbsp", "\xc2\xa0" }, .{ "lpar", "(" }, .{ "rpar", ")" },
+    };
+    for (table) |row| {
+        if (std.mem.eql(u8, name, row[0])) {
+            try out.appendSlice(alloc, row[1]);
+            return;
+        }
+    }
+    // Unknown entities stay literal so resolution cannot hide a scheme.
+    try out.append(alloc, '&');
+    try out.appendSlice(alloc, name);
+    try out.append(alloc, ';');
+}
+
+fn stripControls(alloc: Allocator, value: []const u8) !std.ArrayList(u8) {
+    var out: std.ArrayList(u8) = .empty;
+    for (value) |ch| {
+        if (ch < 0x20 or ch == 0x7f) continue;
+        if (ch == ' ') continue;
+        try out.append(alloc, ch);
+    }
+    return out;
+}
+
+fn safeHref(alloc: Allocator, clean: []const u8) bool {
+    var stripped = stripControls(alloc, clean) catch return false;
+    defer stripped.deinit(alloc);
+    const v = stripped.items;
+    if (v.len == 0) return false;
+    if (v[0] == '/' and v.len > 1 and v[1] == '/') return false; // protocol-relative
+    if (v[0] == '#' or v[0] == '/' or v[0] == '?') return true;
+    // A scheme is `alpha *alnum + - .` followed by ':' before any / ? #.
+    var i: usize = 0;
+    while (i < v.len and v[i] != ':' and v[i] != '/' and v[i] != '?' and v[i] != '#') : (i += 1) {}
+    if (i < v.len and v[i] == ':') {
+        if (i == 0 or !isAsciiAlpha(v[0])) return false;
+        var j: usize = 1;
+        while (j < i) : (j += 1) {
+            const ch = v[j];
+            if (!(std.ascii.isAlphanumeric(ch) or ch == '+' or ch == '-' or ch == '.')) return false;
+        }
+        const scheme = v[0..i];
+        return std.ascii.eqlIgnoreCase(scheme, "http") or
+            std.ascii.eqlIgnoreCase(scheme, "https") or
+            std.ascii.eqlIgnoreCase(scheme, "mailto");
+    }
+    return true; // scheme-relative path such as "notes/1" or "files/1/x"
+}
+
+fn safeImgSrc(alloc: Allocator, clean: []const u8) bool {
+    var stripped = stripControls(alloc, clean) catch return false;
+    defer stripped.deinit(alloc);
+    const v = stripped.items;
+    // Same-origin absolute paths only (CSP img-src 'self'); this also keeps
+    // protocol-relative and remote tracking pixels out.
+    if (v.len < 1 or v[0] != '/') return false;
+    if (v.len > 1 and v[1] == '/') return false;
     return true;
 }
 
-fn safeUrl(url: []const u8, image: bool) bool {
-    if (url.len == 0 or url.len > 2048) return false;
-    for (url) |ch| {
-        if (std.ascii.isControl(ch) or ch == ' ' or ch == '"' or ch == '\'' or ch == '<' or ch == '>') return false;
+// --------------------------------------------------------------------- tests
+
+fn renderToString(alloc: Allocator, source: []const u8) ![]const u8 {
+    var buf: [64 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try renderWithAlloc(alloc, &w, source);
+    return alloc.dupe(u8, w.buffered());
+}
+
+test "markdown renders the Fibonacci table as a real table" {
+    const alloc = std.testing.allocator;
+    const out = try renderToString(alloc, "# Fibonacci\n\n| Katsayi | Yuzde | Aciklama |\n|---------|-------|----------|\n| 0.000 | %0 | Baslangic |\n| 0.236 | %23,6 | Sig |\n");
+    defer alloc.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "<table") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "<thead") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "<tbody") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Katsayi") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "| Katsayi |") == null);
+}
+
+test "markdown renders GFM task lists, tables, and footnotes" {
+    const alloc = std.testing.allocator;
+    const out = try renderToString(alloc, "- [x] done\n- [ ] open\n\ntext[^1]\n\n[^1]: note text\n");
+    defer alloc.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "checkbox") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "checked") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "note text") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "FNREF") == null);
+}
+
+test "markdown escapes raw HTML and blocks XSS fixtures" {
+    const alloc = std.testing.allocator;
+    const cases = [_][]const u8{
+        "<script>alert(1)</script>",
+        "<a href=\"javascript:alert(1)\">x</a>",
+        "<a href=\"&#106;avascript:alert(1)\">x</a>",
+        "<img src=\"x\" onerror=\"alert(1)\">",
+        "<svg onload=alert(1)>",
+        "<iframe src=\"https://evil.example\">",
+        "<div style=\"x:expression(alert(1))\">hi</div>",
+        "[click](javascript:alert(1))",
+        "[click](data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==)",
+        "![remote](https://evil.example/pixel.png)",
+        "![proto](//evil.example/pixel.png)",
+    };
+    for (cases) |c| {
+        const out = try renderToString(alloc, c);
+        defer alloc.free(out);
+        try std.testing.expect(std.mem.indexOf(u8, out, "<script") == null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "javascript:") == null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "onerror") == null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "<svg") == null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "<iframe") == null);
+        // `evil.example` may appear only as escaped text (the iframe tag is
+        // shown, not executed); it must never reach a live src/href/pixel URL.
+        try std.testing.expect(std.mem.indexOf(u8, out, "evil.example/pixel") == null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "src=\"https://evil.example/pixel") == null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "style=") == null);
     }
-    if (std.mem.startsWith(u8, url, "//")) return false;
-    if (image) return std.mem.startsWith(u8, url, "/");
-    if (startsWithIgnoreCase(url, "https://") or startsWithIgnoreCase(url, "http://")) return true;
-    if (startsWithIgnoreCase(url, "mailto:")) return true;
-    return std.mem.startsWith(u8, url, "/");
 }
 
-fn startsWithIgnoreCase(text: []const u8, prefix: []const u8) bool {
-    return text.len >= prefix.len and std.ascii.eqlIgnoreCase(text[0..prefix.len], prefix);
+test "markdown preserves safe inline HTML and safe links" {
+    const alloc = std.testing.allocator;
+    const out = try renderToString(alloc, "<details><summary>s</summary>body</details> <mark>m</mark> [ok](/files/1/a.png) [web](https://example.com)\n");
+    defer alloc.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "<details") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "<mark") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "/files/1/a.png") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "https://example.com") != null);
 }
 
-fn isWordChar(ch: u8) bool {
-    return std.ascii.isAlphanumeric(ch) or ch == '_';
-}
-
-// ---- tests ----
-
-test "markdown escapes raw HTML and unsafe links" {
-    var buf: [4096]u8 = undefined;
-    var w = Writer.fixed(&buf);
-    try render(&w, "<script>alert(1)</script>\n\n[click](javascript:alert(1))\n\n![x](data:text/html,hi)");
-    const out = w.buffered();
-    try std.testing.expect(std.mem.find(u8, out, "<script>") == null);
-    try std.testing.expect(std.mem.find(u8, out, "href=\"javascript:") == null);
-    try std.testing.expect(std.mem.find(u8, out, "src=\"data:") == null);
-    try std.testing.expect(std.mem.find(u8, out, "&lt;script&gt;") != null);
-}
-
-test "markdown renders headings, lists, code, and safe links" {
-    var buf: [4096]u8 = undefined;
-    var w = Writer.fixed(&buf);
-    try render(&w,
-        \\# Title
-        \\
-        \\Hello **bold** and `code`.
-        \\
-        \\- one
-        \\- two
-        \\
-        \\```zig
-        \\const x = 1 < 2;
-        \\```
-        \\
-        \\[docs](https://example.com/a?b=1)
-    );
-    const out = w.buffered();
-    try std.testing.expect(std.mem.find(u8, out, "<h1>Title</h1>") != null);
-    try std.testing.expect(std.mem.find(u8, out, "<strong>bold</strong>") != null);
-    try std.testing.expect(std.mem.find(u8, out, "<code>code</code>") != null);
-    try std.testing.expect(std.mem.find(u8, out, "<ul>") != null);
-    try std.testing.expect(std.mem.find(u8, out, "1 &lt; 2") != null);
-    try std.testing.expect(std.mem.find(u8, out, "href=\"https://example.com/a?b=1\"") != null);
-}
-
-test "markdown leaves snake_case alone and renders images" {
-    var buf: [4096]u8 = undefined;
-    var w = Writer.fixed(&buf);
-    try render(&w, "snake_case_name\n\n![cat](/files/3/cat.png)");
-    const out = w.buffered();
-    try std.testing.expect(std.mem.find(u8, out, "<em>") == null);
-    try std.testing.expect(std.mem.find(u8, out, "src=\"/files/3/cat.png\"") != null);
-    try std.testing.expect(std.mem.find(u8, out, "alt=\"cat\"") != null);
-}
-
-test "markdown keeps images same-origin" {
-    var buf: [4096]u8 = undefined;
-    var w = Writer.fixed(&buf);
-    try render(&w, "![remote](https://example.com/track.png)\n\n![local](/files/1/a.png)");
-    const out = w.buffered();
-    try std.testing.expect(std.mem.find(u8, out, "src=\"https://example.com/track.png\"") == null);
-    try std.testing.expect(std.mem.find(u8, out, "src=\"/files/1/a.png\"") != null);
-}
-
-test "markdown renders indented code blocks" {
-    var buf: [4096]u8 = undefined;
-    var w = Writer.fixed(&buf);
-    try render(&w, "Intro\n\n    const x = 1 < 2;\n    const y = 3;");
-    const out = w.buffered();
-    try std.testing.expect(std.mem.find(u8, out, "<pre><code>const x = 1 &lt; 2;") != null);
-    try std.testing.expect(std.mem.find(u8, out, "\nconst y = 3;</code></pre>") != null);
+test "markdown renders nested emphasis, unicode, and Turkish characters" {
+    const alloc = std.testing.allocator;
+    const out = try renderToString(alloc, "# Grüße ğüşiöç\n\n**a *b* c** and `code|x`\n\n- one\n  - nested\n- two\n");
+    defer alloc.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "ğüşiöç") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "<strong") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "nested") != null);
 }

@@ -367,7 +367,7 @@ pub fn editor(w: *Writer, ctx: Ctx, args: EditorArgs) !void {
     try w.writeAll("\">Cancel</a></div></form>\n");
     if (is_new) try w.writeAll("<p class=\"muted small\">Save once to attach files. Images are uploaded, not pasted, because paste needs JavaScript.</p>\n");
 
-    try w.writeAll("<details class=\"help\"><summary>Markdown cheatsheet</summary><pre># Heading\n**bold** *italic* ~~strike~~\n`inline code`\n- list item\n1. ordered item\n> quote\n[link](https://example.com)\n![alt](/files/ID/name.png)\n```zig\ncode block\n```</pre><p class=\"muted small\">Raw HTML is escaped, never executed. Links allow http, https, mailto, and same-site paths. Images must use a same-site path such as /files/.</p></details>\n");
+    try w.writeAll("<details class=\"help\"><summary>Markdown cheatsheet</summary><pre># Heading\n**bold** *italic* ~~strike~~\n`inline code`\n- list item\n1. ordered item\n> quote\n[link](https://example.com)\n![alt](/files/ID/name.png)\n```zig\ncode block\n```</pre><p class=\"muted small\">Raw HTML in an allowlisted subset is kept after sanitization; scripts, handlers, and dangerous URLs never render. Links allow http, https, mailto, and same-site paths. Images must use a same-site path such as /files/.</p></details>\n");
 
     if (!is_new) {
         try w.writeAll("<section class=\"upload\"><h2 class=\"rail-title\">Add a file</h2>");

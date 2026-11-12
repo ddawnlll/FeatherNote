@@ -45,8 +45,15 @@ notes stay in a sidebar on desktop.
 ### Write in Markdown
 
 The editor is a plain textarea plus a cheatsheet. Headings, emphasis, lists,
-quotes, fenced and indented code, links, and images are rendered by a small
-server-side parser. Raw HTML is escaped, never executed.
+quotes, fenced and indented code, links, images, tables, task lists,
+strikethrough, footnotes, and autolinks are rendered on the server by MD4C
+(CommonMark + GFM). A safe subset of raw HTML is rendered after allowlist
+sanitization; active content such as scripts, event handlers, iframes, and
+dangerous URLs is never executed.
+
+![A Fibonacci call table rendered as a real HTML table](docs/screenshots/fibonacci-table.png)
+
+![The same table in the Midnight theme](docs/screenshots/fibonacci-table-dark.png)
 
 ![Editing a Markdown note](docs/screenshots/note-editor.png)
 
@@ -185,10 +192,14 @@ security notes are in [`docs/MCP.md`](docs/MCP.md).
   committed and synced before the response is sent.
 - **Optimistic concurrency.** Each note has a version. A stale save gets a 409
   and both versions, never a silent overwrite.
-- **Safe Markdown.** A small renderer escapes all source text, never passes
-  raw HTML through, allows links to http(s), mailto, and same-origin paths, and
-  allows images only from same-origin paths. See
-  [`src/markdown.zig`](src/markdown.zig).
+- **Safe Markdown.** Notes are rendered by the vendored MD4C 0.5.3 parser
+  (CommonMark + GitHub dialect: tables, task lists, strikethrough, autolinks)
+  followed by an allowlist HTML sanitizer. Links allow http(s), mailto,
+  same-origin paths, and `#` fragments; images allow same-origin paths only;
+  scripts, event handlers, styles, iframes, SVG/MathML, and unsafe schemes
+  never reach the browser. Footnotes are a FeatherNote extension. See
+  [`src/markdown.zig`](src/markdown.zig), [`vendor/md4c/VENDOR.md`](vendor/md4c/VENDOR.md),
+  and decision D019 in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 - **Attachments in SQLite.** Uploads are parsed as multipart, size-capped at
   8 MiB, MIME-sniffed from the bytes, and stored as BLOBs. Images are served
   inline. Everything else, including SVG and HTML, is served as a download
