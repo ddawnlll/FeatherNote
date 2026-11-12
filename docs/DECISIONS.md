@@ -81,3 +81,52 @@ The server reads note plaintext to render and search it. No end-to-end encryptio
 Lexbor was evaluated and not vendored: it is only an HTML5 parser, not a sanitizer, and MD4C output is well-formed XHTML that the Zig tokenizer sanitizes directly, so a second C dependency bought nothing. cmark-gfm was not adopted because MD4C already passes the suites below and FeatherNote needs no AST for reading; a future block editor may revisit that tradeoff. Math, diagrams, alerts/admonitions, wiki links, underline, and LaTeX spans are not enabled and render as text or plain emphasis; header IDs are not generated. Alerts are not supported.
 
 Measured with the upstream `md2html` tool against MD4C 0.5.3 sources on 2026-11-12: CommonMark spec.txt 652/652, tables 12/12, tasklists 5/5, strikethrough 5/5, permissive autolinks 15/15, regressions 65/65. Cost: binary 2,648,856 to 2,813,720 bytes, idle RSS 6,148 to 6,972 KiB at 100 notes, note GET p95 3.2 to 3.9 ms. Sources are pinned in `vendor/md4c/CHECKSUMS.txt`.
+
+## D020 — Zero-JS rich editing is server-driven blocks over byte ranges
+
+Issue #3's rich editor is not a browser widget. `src/blocks.zig` splits the
+stored Markdown into blocks described by byte ranges `[start, end)` over the
+original body, and the separator bytes between blocks (newlines and blank
+lines) belong to no block, so editing block *k* splices only its own bytes
+and every unedited block keeps its exact original bytes. There is no
+reformat pass and no canonical rewrite: the source editor and the block
+editor share one stored representation, Markdown remains canonical, and
+opening the block editor and changing nothing writes nothing at all.
+
+Editable kinds are paragraph, heading (levels 1-6), unordered/ordered lists,
+checklist tasks, quote, fenced code (with language), table, thematic break,
+link, and image. Constructs the editor cannot regenerate without loss
+(indented code, nested or mixed lists, footnote and link reference
+definitions, HTML blocks, multi-paragraph quotes, large tables) are
+classified as `raw` and stay editable as verbatim Markdown. That is the
+documented source fallback, not a silent degradation: the read renderer
+(D019) still renders the full document, and nothing the user wrote is
+rewritten by accident.
+
+Operations (all `POST` with CSRF and the optimistic version, 409 on stale
+version with the draft preserved): title save, per-block update, insert
+before/after, delete behind an explicit confirmation, move up/down,
+duplicate, convert between kinds, and table add/delete row/column plus a
+per-cell grid (escaped pipes and code spans respected). Limits: 200 blocks
+per note and 512 rendered table cells; larger tables fall back to verbatim
+Markdown editing. The form parser's field cap rose from 32 to 1024 total
+fields for the same reason; total work is still bounded by the encoded
+request size cap in the HTTP layer, and duplicate field names stay
+rejected. Preview (`POST /notes/preview`, `POST /notes/{id}/preview`)
+renders the current draft through the D019 pipeline and writes nothing;
+the version is validated so a stale tab cannot preview as if current.
+
+Deliberately not provided: live cursor tracking, drag-and-drop reordering,
+inline formatting buttons (form controls only), autosave, and any client
+script. Each block save is a full form submission that lands on an anchor
+(`#block-N`) so keyboard users keep their place. Verified in Chromium with
+JavaScript disabled (38 browser checks, desktop/mobile, light/dark) plus
+integration tests for preview, all block operations, table editing, and
+stale-version conflict.
+
+Measured 2026-11-12, same bench and machine (`scripts/bench.py` now also
+measures the blocks page and preview endpoints): binary 2,813,720 to
+2,908,312 bytes (+94,592 B, +3.4%); idle RSS at 100 notes 6,972 to 7,920
+KiB; blocks page GET p50/p95 1.99/2.69 ms at 100 notes and 2.04/3.53 ms at
+10,000 notes; preview POST p50/p95 2.42/5.45 ms and 2.54/5.60 ms. Zero
+bytes of frontend JavaScript are still served by every page.
