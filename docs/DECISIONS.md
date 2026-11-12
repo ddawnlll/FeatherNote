@@ -62,9 +62,9 @@ Admin commands print status and errors with `std.debug.print` (stderr). Tests ac
 
 The selected theme is a validated id stored on the single owner row and emitted as `data-theme` on `<html>`. One embedded stylesheet carries all twelve palettes. Switching is a CSRF-protected form post. This keeps the choice consistent across devices, includes it in backups, and avoids a theme-flash cookie or any client script. The CSS grew from 3 KiB to about 23 KiB; it is still a single embedded, cacheable request with no per-navigation cost.
 
-## D016 — Markdown is a safe, bounded subset rendered on the server
+## D016 — Markdown was a safe, bounded subset rendered on the server
 
-`src/markdown.zig` renders headings, emphasis, strikethrough, inline and fenced or indented code, lists, quotes, rules, links, and images. Source text is escaped before output, raw HTML never passes through, and links are limited to http(s), mailto, and same-origin absolute paths. Images are same-origin only, matching the CSP's `img-src 'self'`, so remote images cannot be used as tracking pixels. Innermost emphasis and link labels are depth-limited. The read view renders this HTML; the editor stays a plain textarea. Tables, footnotes, task lists, and embedded HTML are intentionally unsupported and degrade to text.
+`src/markdown.zig` rendered headings, emphasis, strikethrough, inline and fenced or indented code, lists, quotes, rules, links, and images. Source text was escaped before output, raw HTML never passed through, and links were limited to http(s), mailto, and same-origin absolute paths. Images were same-origin only, matching the CSP's `img-src 'self'`, so remote images could not be used as tracking pixels. Innermost emphasis and link labels were depth-limited. The read view rendered this HTML; the editor stayed a plain textarea. Tables, footnotes, task lists, and embedded HTML were intentionally unsupported and degraded to text. Superseded by D019.
 
 ## D017 — Attachments are SQLite BLOBs, uploaded without JavaScript
 
@@ -73,3 +73,11 @@ Files up to 8 MiB are parsed from `multipart/form-data`, MIME-sniffed from their
 ## D018 — Plaintext is the product
 
 The server reads note plaintext to render and search it. No end-to-end encryption is claimed. Database and backup file permissions, plus host security, are the protection boundary; backups leaving the host require operator-managed encryption.
+
+## D019 — MD4C for parsing, a Zig allowlist sanitizer for safety
+
+`src/markdown.zig` is now a three-stage pipeline: (1) a footnote preprocessor (`[^label]` definitions/references, skipped inside fenced and inline code), because MD4C has no footnote support; (2) the vendored MD4C 0.5.3 parser (MIT, `vendor/md4c/`, see `VENDOR.md`) via a thin C bridge with the GitHub dialect and XHTML output, which provides full CommonMark plus tables, task lists, strikethrough, and permissive autolinks; (3) an allowlist HTML sanitizer with an explicit tag tokenizer and element stack (no regexes). Every byte of HTML output passes the sanitizer, including MD4C-emitted links and raw HTML from the note: allowlisted tags are kept with allowlisted, validated attributes; disallowed tags are escaped as visible text; comments are dropped; `on*` handlers, `style`, `srcdoc`, and unsafe URLs are stripped or dropped; `href` allows http(s), mailto, same-origin paths, and `#` fragments; `img src` allows same-origin absolute paths only (CSP `img-src 'self'` still prevents tracking pixels). Element depth and total output are capped. On any failure the renderer fails closed and escapes the whole source.
+
+Lexbor was evaluated and not vendored: it is only an HTML5 parser, not a sanitizer, and MD4C output is well-formed XHTML that the Zig tokenizer sanitizes directly, so a second C dependency bought nothing. cmark-gfm was not adopted because MD4C already passes the suites below and FeatherNote needs no AST for reading; a future block editor may revisit that tradeoff. Math, diagrams, alerts/admonitions, wiki links, underline, and LaTeX spans are not enabled and render as text or plain emphasis; header IDs are not generated. Alerts are not supported.
+
+Measured with the upstream `md2html` tool against MD4C 0.5.3 sources on 2026-11-12: CommonMark spec.txt 652/652, tables 12/12, tasklists 5/5, strikethrough 5/5, permissive autolinks 15/15, regressions 65/65. Cost: binary 2,648,856 to 2,813,720 bytes, idle RSS 6,148 to 6,972 KiB at 100 notes, note GET p95 3.2 to 3.9 ms. Sources are pinned in `vendor/md4c/CHECKSUMS.txt`.

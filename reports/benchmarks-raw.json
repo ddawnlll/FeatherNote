@@ -1,5 +1,5 @@
 {
-  "utc": "2026-11-07T13:45:58Z",
+  "utc": "2026-11-12T12:26:37Z",
   "machine": {
     "cpu": "Intel(R) Xeon(R) CPU E5-2680 v2 @ 2.80GHz",
     "kernel": "6.12.115+deb13.1-amd64",
@@ -9,143 +9,143 @@
     {
       "notes": 100,
       "body_size": 1024,
-      "pid": 17329,
-      "login_ms": 133.724,
-      "hwm_after_login_kib": 23688,
-      "hwm_after_saves_kib": 23688,
+      "pid": 3967354,
+      "login_ms": 128.23,
+      "hwm_after_login_kib": 24224,
+      "hwm_after_saves_kib": 24224,
       "get_note": {
         "n": 200,
-        "p50_ms": 2.152,
-        "p95_ms": 3.195,
-        "p99_ms": 3.787,
-        "max_ms": 4.16
+        "p50_ms": 1.766,
+        "p95_ms": 3.872,
+        "p99_ms": 9.284,
+        "max_ms": 16.576
       },
       "list": {
         "n": 200,
-        "p50_ms": 2.374,
-        "p95_ms": 2.968,
-        "p99_ms": 3.233,
-        "max_ms": 4.331
+        "p50_ms": 1.59,
+        "p95_ms": 3.102,
+        "p99_ms": 5.686,
+        "max_ms": 15.749
       },
       "search": {
         "n": 200,
-        "p50_ms": 3.527,
-        "p95_ms": 4.733,
-        "p99_ms": 5.576,
-        "max_ms": 7.107
+        "p50_ms": 2.619,
+        "p95_ms": 5.043,
+        "p99_ms": 8.773,
+        "max_ms": 22.973
       },
       "save": {
         "n": 100,
-        "p50_ms": 4.399,
-        "p95_ms": 9.139,
-        "p99_ms": 9.764,
-        "max_ms": 13.106
+        "p50_ms": 4.679,
+        "p95_ms": 16.159,
+        "p99_ms": 28.071,
+        "max_ms": 28.071
       },
       "get_note_concurrency": {
         "1": {
           "n": 200,
-          "p50_ms": 0.712,
-          "p95_ms": 0.908,
-          "p99_ms": 1.074,
-          "max_ms": 1.448
+          "p50_ms": 1.575,
+          "p95_ms": 2.576,
+          "p99_ms": 3.067,
+          "max_ms": 4.103
         },
         "2": {
           "n": 200,
-          "p50_ms": 0.911,
-          "p95_ms": 1.352,
-          "p99_ms": 2.046,
-          "max_ms": 2.269
+          "p50_ms": 1.692,
+          "p95_ms": 4.823,
+          "p99_ms": 10.327,
+          "max_ms": 13.456
         },
         "8": {
           "n": 200,
-          "p50_ms": 5.291,
-          "p95_ms": 13.671,
-          "p99_ms": 17.123,
-          "max_ms": 18.685
+          "p50_ms": 6.614,
+          "p95_ms": 10.643,
+          "p99_ms": 12.155,
+          "max_ms": 14.214
         }
       },
-      "idle_rss_kib": 6148,
-      "idle_pss_kib": 4751,
-      "rss_after_requests_kib": 6148,
-      "pss_after_requests_kib": 4750,
+      "idle_rss_kib": 6972,
+      "idle_pss_kib": 5418,
+      "rss_after_requests_kib": 6972,
+      "pss_after_requests_kib": 5418,
       "idle_cpu_seconds_per_5s": 0.0,
-      "hwm_kib": 23688,
-      "css_bytes": 3047,
-      "list_html_bytes_50": 8914,
-      "binary_bytes": 2406040,
-      "hwm_after_256k_note_kib": 23688,
-      "big_note_post_ms": 29.984,
+      "hwm_kib": 24224,
+      "css_bytes": 24616,
+      "list_html_bytes_50": 11534,
+      "binary_bytes": 2813592,
+      "hwm_after_256k_note_kib": 24224,
+      "big_note_post_ms": 47.428,
       "cgroup_128m": "UNVERIFIED (cgroup v2 root is not writable by this user)"
     },
     {
       "notes": 10000,
       "body_size": 1024,
-      "pid": 17387,
-      "login_ms": 57.784,
-      "hwm_after_login_kib": 23968,
-      "hwm_after_saves_kib": 23968,
+      "pid": 3967514,
+      "login_ms": 77.072,
+      "hwm_after_login_kib": 23996,
+      "hwm_after_saves_kib": 23996,
       "get_note": {
         "n": 200,
-        "p50_ms": 0.792,
-        "p95_ms": 1.093,
-        "p99_ms": 1.438,
-        "max_ms": 1.952
+        "p50_ms": 1.325,
+        "p95_ms": 2.308,
+        "p99_ms": 5.767,
+        "max_ms": 16.143
       },
       "list": {
         "n": 200,
-        "p50_ms": 1.501,
-        "p95_ms": 5.096,
-        "p99_ms": 6.282,
-        "max_ms": 6.414
+        "p50_ms": 4.207,
+        "p95_ms": 5.426,
+        "p99_ms": 8.945,
+        "max_ms": 13.12
       },
       "search": {
         "n": 200,
-        "p50_ms": 3.2,
-        "p95_ms": 4.231,
-        "p99_ms": 4.784,
-        "max_ms": 4.852
+        "p50_ms": 3.274,
+        "p95_ms": 9.937,
+        "p99_ms": 14.544,
+        "max_ms": 26.925
       },
       "save": {
         "n": 100,
-        "p50_ms": 7.581,
-        "p95_ms": 10.575,
-        "p99_ms": 12.76,
-        "max_ms": 26.226
+        "p50_ms": 5.789,
+        "p95_ms": 16.763,
+        "p99_ms": 20.698,
+        "max_ms": 36.701
       },
       "get_note_concurrency": {
         "1": {
           "n": 200,
-          "p50_ms": 1.736,
-          "p95_ms": 2.15,
-          "p99_ms": 2.252,
-          "max_ms": 2.614
+          "p50_ms": 2.002,
+          "p95_ms": 3.076,
+          "p99_ms": 7.176,
+          "max_ms": 11.176
         },
         "2": {
           "n": 200,
-          "p50_ms": 2.621,
-          "p95_ms": 3.692,
-          "p99_ms": 4.785,
-          "max_ms": 9.373
+          "p50_ms": 2.401,
+          "p95_ms": 4.862,
+          "p99_ms": 5.972,
+          "max_ms": 7.052
         },
         "8": {
           "n": 200,
-          "p50_ms": 9.743,
-          "p95_ms": 15.449,
-          "p99_ms": 18.31,
-          "max_ms": 21.813
+          "p50_ms": 9.871,
+          "p95_ms": 22.996,
+          "p99_ms": 40.03,
+          "max_ms": 45.38
         }
       },
-      "idle_rss_kib": 6772,
-      "idle_pss_kib": 5237,
-      "rss_after_requests_kib": 6772,
-      "pss_after_requests_kib": 5239,
+      "idle_rss_kib": 7152,
+      "idle_pss_kib": 5744,
+      "rss_after_requests_kib": 7152,
+      "pss_after_requests_kib": 5744,
       "idle_cpu_seconds_per_5s": 0.0,
-      "hwm_kib": 23968,
-      "css_bytes": 3047,
-      "list_html_bytes_50": 9143,
-      "binary_bytes": 2406040,
-      "hwm_after_256k_note_kib": 23968,
-      "big_note_post_ms": 28.005,
+      "hwm_kib": 23996,
+      "css_bytes": 24616,
+      "list_html_bytes_50": 11689,
+      "binary_bytes": 2813592,
+      "hwm_after_256k_note_kib": 23996,
+      "big_note_post_ms": 41.517,
       "cgroup_128m": "UNVERIFIED (cgroup v2 root is not writable by this user)"
     }
   ]
