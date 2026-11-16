@@ -193,6 +193,31 @@ spaces, require valid UTF-8, reject control characters and cap the label at 80
 bytes; MCP applies the same rule.
 
 History and revision detail show labels, and the detail page has a CSRF-
-protected form to set or clear one. Because FeatherNote has no retention job,
-labelled revisions cannot be pruned by accident; when retention is added it
-must explicitly protect non-empty labels.
+protected form to set or clear one. Retention (D024) treats every non-empty
+label as a hard floor and never deletes it.
+
+## D024 — Retention is an explicit prefix purge with a recorded floor
+
+Migration `0006_retention` adds `note_history_retention`, one row per purged
+note holding the first retained revision and cumulative purged count. Revision
+numbers above that floor stay contiguous; the doctor compares each chain's
+minimum against the floor instead of assuming every note still starts at r1.
+
+`admin purge-history` requires `--keep-last N`, optionally accepts
+`--older-than-days`, and is a dry run until `--apply` is passed. Per note it
+protects the newest N revisions, every labelled revision, and every revision
+newer than the age cutoff. Only the contiguous unlabelled prefix below all
+three is deleted. This deliberately avoids punching holes that would break
+compare, restore, or the chain invariant.
+
+A stale draft whose base revision was purged still receives 409 and keeps its
+draft, but the base-diff section is unavailable; the page says so rather than
+inventing a base.
+
+Verification runs inside the same transaction before commit: labelled count is
+unchanged, every note still has a head, chain shape matches the floor, floors
+point at an existing revision at or below the head, asset manifests resolve,
+and `PRAGMA integrity_check` passes. A failure rolls back. There is no timer,
+no daemon, and no retention in the web or MCP surface; an operator with database
+access performs it. History pages state the floor when it is above r1, and
+compare rejects revisions below it.

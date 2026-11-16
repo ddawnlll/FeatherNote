@@ -133,8 +133,9 @@ referenced. Restoring a revision also restores the files it referenced.
 
 Any revision can carry a short human-readable **checkpoint label** such as
 "Before restructuring". Labels annotate the immutable snapshot, are excluded
-from its content checksum, and appear in the timeline. There is no pruning job
-to accidentally remove a labelled revision.
+from its content checksum, and appear in the timeline. History is append-only
+by default; no scheduled job prunes it. The explicit operator purge described
+under [Backup and restore](#backup-and-restore) always keeps labelled revisions.
 
 ### Focus reading and printing
 
@@ -334,6 +335,27 @@ chains and checksums, current-state/head agreement, asset-manifest resolution,
 attachment ownership and label bounds. It exits non-zero on any failure and
 never writes to the database. Both backup and restore scripts run it.
 
+### Explicit history retention
+
+FeatherNote never purges history automatically. An operator can remove only the
+oldest unlabelled revisions with a dry run first:
+
+```sh
+feathernote admin purge-history --db /var/lib/feathernote/feathernote.db \
+  --keep-last 50 --older-than-days 365
+```
+
+`--keep-last` is required. The command always keeps the newest N revisions per
+note, every revision carrying a checkpoint label, and, when `--older-than-days`
+is set, every revision newer than that cutoff. It removes only a contiguous
+prefix below those protections, records the first retained revision as a
+per-note retention floor, verifies labelled rows, heads, chain shape, asset
+manifests and `integrity_check`, then rolls back. Add `--apply` to commit only
+after that verification passes. The History page reports any floor above r1.
+If a stale draft was based on a revision that has since been purged, its 409
+page still preserves the draft and shows the latest note, but cannot show the
+missing base diff.
+
 Backups that leave the host should be encrypted with a key you manage
 separately. FeatherNote does not claim end-to-end encryption, because the
 server reads plaintext.
@@ -342,7 +364,7 @@ server reads plaintext.
 
 ```sh
 zig build test                 # unit tests: Markdown, diff, revisions, CRUD, search
-python3 tests/integration.py   # 178 real HTTP checks, no JavaScript
+python3 tests/integration.py   # 194 real HTTP checks, no JavaScript
 python3 tests/mcp_test.py      # 55 stdio MCP protocol checks
 python3 scripts/bench.py --requests 200 --counts 100,10000
 ```
@@ -445,11 +467,13 @@ vendor/sqlite/  pinned SQLite 3.54.1 amalgamation with checksums
 - Attachments are capped at 8 MiB each and stored inside SQLite, so backups
   grow with them. There are no thumbnails or image transcoding.
 - Search is word matching, not a query language.
-- No purge UI. Deleted notes stay in Trash until an operator removes them.
+- No web UI for history purge or attachment removal. Deleted notes stay in
+  Trash, and history is retained until an operator runs `admin purge-history`.
 - No background worker, polling loop, websocket, or sync protocol.
 - No graceful-shutdown handler. `SIGTERM` is safe because WAL plus
   `synchronous=FULL` keeps acknowledged writes.
-- Revisions and diffs are future work. The 409 flow preserves drafts today.
+- History retention is operator-only and prefix-based; it cannot remove a
+  labelled checkpoint or punch holes above the recorded floor.
 
 ## License
 

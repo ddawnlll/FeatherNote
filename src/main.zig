@@ -111,6 +111,9 @@ pub fn main(init: std.process.Init) !void {
             const cfg = parseConfig(init.environ_map.*, &it);
             const ok = try adminDoctor(gpa, io, cfg.db_path);
             if (!ok) std.process.exit(1);
+        } else if (std.mem.eql(u8, sub, "purge-history")) {
+            const options = parsePurgeOptions(init.environ_map.*, &it);
+            try adminPurgeHistory(gpa, io, options);
         } else {
             std.debug.print("unknown admin command: {s}\n", .{sub});
             std.process.exit(2);
@@ -134,6 +137,8 @@ fn printUsage() void {
         \\  feathernote admin backup [--db PATH] --out PATH
         \\  feathernote admin integrity [--db PATH]
         \\  feathernote admin doctor [--db PATH]
+        \\  feathernote admin purge-history [--db PATH] --keep-last N
+        \\                   [--older-than-days N] [--apply]
         \\
     , .{});
 }
@@ -192,6 +197,43 @@ fn parseConfigWithOut(env: std.process.Environ.Map, it: *std.process.Args.Iterat
         }
     }
     return cfg;
+}
+
+const PurgeCliOptions = struct {
+    db_path: []const u8,
+    keep_last: usize,
+    older_than_days: u32,
+    apply: bool,
+};
+
+fn parsePurgeOptions(env: std.process.Environ.Map, it: *std.process.Args.Iterator) PurgeCliOptions {
+    var options = PurgeCliOptions{
+        .db_path = env.get("FEATHERNOTE_DB") orelse "data/feathernote.db",
+        .keep_last = 0,
+        .older_than_days = 0,
+        .apply = false,
+    };
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--db")) {
+            options.db_path = it.next() orelse fatal("--db requires a path");
+        } else if (std.mem.eql(u8, arg, "--keep-last")) {
+            const raw = it.next() orelse fatal("--keep-last requires a number");
+            options.keep_last = std.fmt.parseInt(usize, raw, 10) catch fatal("--keep-last must be a positive integer");
+        } else if (std.mem.eql(u8, arg, "--older-than-days")) {
+            const raw = it.next() orelse fatal("--older-than-days requires a number");
+            options.older_than_days = std.fmt.parseInt(u32, raw, 10) catch fatal("--older-than-days must be an integer");
+        } else if (std.mem.eql(u8, arg, "--apply")) {
+            options.apply = true;
+        } else {
+            std.debug.print("unknown option: {s}\n", .{arg});
+            std.process.exit(2);
+        }
+    }
+    if (options.keep_last < 1) {
+        std.debug.print("purge-history requires --keep-last N (N >= 1)\n", .{});
+        std.process.exit(2);
+    }
+    return options;
 }
 
 fn fatal(comptime message: []const u8) noreturn {
@@ -1547,8 +1589,9 @@ fn handleHistory(app: *App, arena: Allocator, ctx: views.Ctx, id: i64, page: usi
     const note = try app.database.getNote(arena, id, true) orelse return notFound(arena, ctx);
     const rows = try app.database.listRevisions(arena, id, (page - 1) * util.page_size, util.page_size);
     const total = try app.database.countRevisions(id);
+    const first_revision = try app.database.historyFloor(id);
     var aw = std.Io.Writer.Allocating.init(arena);
-    try views.history(&aw.writer, ctx, .{ .note = note, .rows = rows, .total = total, .page = page });
+    try views.history(&aw.writer, ctx, .{ .note = note, .rows = rows, .total = total, .page = page, .first_revision = first_revision });
     return .{ .status = .ok, .body = aw.written() };
 }
 
@@ -1672,9 +1715,10 @@ fn handleCompare(app: *App, arena: Allocator, ctx: views.Ctx, id: i64, query: Qu
     const note = try app.database.getNote(arena, id, true) orelse return notFound(arena, ctx);
     const head = try app.database.latestRevisionNo(id);
     if (head < 1) return notFound(arena, ctx);
-    const from_no = query.from orelse @max(@as(i64, 1), head - 1);
+    const floor = try app.database.historyFloor(id);
+    const from_no = query.from orelse @max(floor, head - 1);
     const to_no = query.to orelse head;
-    if (from_no < 1 or to_no < 1 or from_no > head or to_no > head) {
+    if (from_no < floor or to_no < floor or from_no > head or to_no > head) {
         return htmlError(arena, ctx, .bad_request, "Unknown revision", "Both revisions must exist in this note's history.");
     }
     const from_rev = (try app.database.getRevision(arena, id, from_no)) orelse return notFound(arena, ctx);
@@ -1791,6 +1835,39 @@ fn adminDoctor(gpa: Allocator, io: Io, db_path: []const u8) !bool {
     };
     std.debug.print("{s}", .{aw.written()});
     return ok;
+}
+
+fn adminPurgeHistory(gpa: Allocator, io: Io, options: PurgeCliOptions) !void {
+    std.Io.Dir.cwd().access(io, options.db_path, .{}) catch {
+        std.debug.print("database not found: {s}\n", .{options.db_path});
+        return error.DatabaseNotFound;
+    };
+    const database = db.Db.open(gpa, io, options.db_path) catch |err| {
+        std.debug.print("cannot open database: {t}\n", .{err});
+        return err;
+    };
+    defer database.close(gpa);
+    const result = database.purgeHistory(nowSeconds(io), .{
+        .keep_last = options.keep_last,
+        .older_than_days = options.older_than_days,
+        .apply = options.apply,
+    }) catch |err| {
+        std.debug.print("history purge failed: {t}\n", .{err});
+        return err;
+    };
+    std.debug.print("History retention ({s})\n", .{if (result.applied) "applied" else "dry run"});
+    std.debug.print("  notes scanned: {d}\n", .{result.notes_scanned});
+    std.debug.print("  revisions {s}: {d}\n", .{ if (result.applied) "removed" else "that would be removed", result.revisions_removed });
+    std.debug.print("  labelled revisions protected: {d}\n", .{result.labelled_protected});
+    std.debug.print("  per-note retention floors updated: {d}\n", .{result.floors_updated});
+    std.debug.print("  verification: {s}\n", .{if (result.verified) "PASS" else "FAIL"});
+    if (!result.verified) {
+        std.debug.print("Retention verification failed; the transaction was rolled back.\n", .{});
+        std.process.exit(1);
+    }
+    if (!result.applied) {
+        std.debug.print("Nothing was committed. Rerun with --apply to purge.\n", .{});
+    }
 }
 
 test {

@@ -1,5 +1,48 @@
 # FeatherNote benchmark report
 
+## Re-measurement after focus mode and retention (2026-11-16, Issues #11 and #6)
+
+Same machine and command (`python3 scripts/bench.py --requests 200
+--counts 100,10000`). Focus mode adds a read-only route; retention adds an
+admin command, a per-note floor table and one floor lookup on the history and
+compare pages. No note-write or search path changed.
+
+| Metric | After revision engine | Current | Delta |
+|---|---:|---:|---:|
+| Binary | 2,999,704 B | 3,055,384 B | +55,680 B (+1.9%) |
+| Idle RSS, 100 notes | 8,276 KiB | 8,280 KiB | +4 KiB |
+| Idle RSS, 10k notes | 8,544 KiB | 8,524 KiB | -20 KiB |
+| Save p95, 100 / 10k notes | 15.81 / 19.32 ms | 12.90 / 14.72 ms | VM variance, no claim |
+| History page p95, 100 / 10k notes | 4.43 / 4.26 ms | 4.55 / 3.01 ms | includes floor lookup |
+| Compare page p95, 100 / 10k notes | 2.36 / 6.90 ms | 6.81 / 2.56 ms | VM variance, no claim |
+| Database bytes, 100 / 10k notes | 4,509,248 / 19,156,448 B | 4,517,440 / 19,164,640 B | seeded notes/revisions |
+| CSS | 28,844 B | 31,921 B | focus and print styles |
+| JS served | 0 B | 0 B | 0 |
+
+The save and compare p95 swap between the two runs rather than trending in one
+direction, so the table reports them without a win/loss claim. Raw output is
+`reports/benchmarks-raw.json` from 2026-11-16T10:52:42Z.
+
+### Explicit purge, 100,000 revisions
+
+`python3 scripts/bench-retention.py --revisions 100000 --keep-last 100`
+creates one note with 100,000 full snapshots, then runs the real dry run,
+apply and doctor. One run on this VM:
+
+| Step | Measured |
+|---|---:|
+| Revisions before / after | 100,000 / 100 |
+| Dry run (`--keep-last 100`) | 1,435.2 ms |
+| Apply (`--keep-last 100 --apply`) | 1,466.1 ms |
+| Doctor after purge | 10.2 ms |
+| Purge verification | PASS |
+| Database bytes before / after | 19,451,904 / 19,451,904 B |
+
+This is a single administrative operation, not a percentile distribution.
+The file size is unchanged because SQLite keeps freed pages for reuse; an
+offline `VACUUM` would be required to return space to the filesystem. Raw
+JSON is `reports/retention-purge-raw.json`.
+
 ## Re-measurement after the revision engine (2026-11-16, Issue #6)
 
 Same machine and command (`python3 scripts/bench.py --requests 200
@@ -237,6 +280,7 @@ VmRSS           = 5684 kB     (5.55 MiB)
 | Live HTTPS deployment | **UNVERIFIED** | No public host, domain, certificate, or sudo access was available. Nginx/systemd samples are provided but not executed here. |
 | Browser screenshots at phone/desktop widths | **VERIFIED, capture only** | Playwright captures at 1280 px and 390 px are in `docs/screenshots/` and are reproducible with `scripts/capture-screenshots.js`. No pixel-diff baseline exists. |
 | 256 KiB note p95 | single sample only | The benchmark records one large-note POST, not a 200-sample distribution. |
+| Purge at 1,000,000 revisions | **UNVERIFIED** | Only 100,000 revisions were measured; no linear-time claim beyond that sample. |
 
 ## Reproduction caveats
 

@@ -1002,6 +1002,7 @@ pub const HistoryArgs = struct {
     rows: []const db.RevisionRow,
     total: i64,
     page: usize,
+    first_revision: i64 = 1,
 };
 
 pub fn history(w: *Writer, ctx: Ctx, args: HistoryArgs) !void {
@@ -1016,14 +1017,19 @@ pub fn history(w: *Writer, ctx: Ctx, args: HistoryArgs) !void {
         args.total,
         if (args.total == 1) "" else "s",
     });
+    if (args.first_revision > 1) {
+        try w.print("<p class=\"page-meta retention-note\">Revisions before r{d} were removed by an explicit retention policy; labelled checkpoints are always kept.</p>\n", .{args.first_revision});
+    }
 
     const head = if (args.rows.len > 0) args.rows[0].revision_no else 0;
     if (head > 0) {
         try w.writeAll("<form class=\"compare-form\" method=\"get\" action=\"/notes/");
         try w.print("{d}/compare\"", .{args.note.id});
-        try w.writeAll("><h2>Compare revisions</h2><label>From <input type=\"number\" name=\"from\" min=\"1\" max=\"");
-        try w.print("{d}\" value=\"{d}\" required></label>", .{ head, @max(@as(i64, 1), head - 1) });
-        try w.writeAll("<label>To <input type=\"number\" name=\"to\" min=\"1\" max=\"");
+        try w.writeAll("><h2>Compare revisions</h2><label>From <input type=\"number\" name=\"from\" min=\"");
+        try w.print("{d}\" max=\"", .{args.first_revision});
+        try w.print("{d}\" value=\"{d}\" required></label>", .{ head, @max(args.first_revision, head - 1) });
+        try w.writeAll("<label>To <input type=\"number\" name=\"to\" min=\"");
+        try w.print("{d}\" max=\"", .{args.first_revision});
         try w.print("{d}\" value=\"{d}\" required></label>", .{ head, head });
         try w.writeAll("<button type=\"submit\" class=\"button secondary\">Compare</button></form>\n");
     }

@@ -247,7 +247,7 @@ pub const Db = struct {
             \\SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
         );
         const current = self.schemaVersion() catch return DbError.MigrationFailed;
-        if (current > 5) return DbError.VersionMismatch;
+        if (current > 6) return DbError.VersionMismatch;
         if (current == 0) {
             try self.execRaw("BEGIN IMMEDIATE;");
             errdefer _ = self.execRaw("ROLLBACK;") catch {};
@@ -282,6 +282,13 @@ pub const Db = struct {
             errdefer _ = self.execRaw("ROLLBACK;") catch {};
             try self.execRaw(assets.migration_0005);
             try self.execRaw("UPDATE schema_meta SET version = 5;");
+            try self.execRaw("COMMIT;");
+        }
+        if (current <= 5) {
+            try self.execRaw("BEGIN IMMEDIATE;");
+            errdefer _ = self.execRaw("ROLLBACK;") catch {};
+            try self.execRaw(assets.migration_0006);
+            try self.execRaw("UPDATE schema_meta SET version = 6;");
             try self.execRaw("COMMIT;");
         }
     }
@@ -1206,6 +1213,18 @@ pub const Db = struct {
         return c.sqlite3_column_int64(stmt.handle, 0);
     }
 
+    /// First revision still available for a note. Returns 1 when nothing has
+    /// been purged, including for notes without a retention row.
+    pub fn historyFloor(self: *Db, id: i64) !i64 {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare("SELECT floor_revision FROM note_history_retention WHERE note_id = ?");
+        defer stmt.deinit();
+        try stmt.bindInt(1, id);
+        if (try stmt.step() != c.SQLITE_ROW) return 1;
+        return c.sqlite3_column_int64(stmt.handle, 0);
+    }
+
     pub fn revisionAssets(
         self: *Db,
         allocator: Allocator,
@@ -1416,6 +1435,189 @@ pub const Db = struct {
         return c.sqlite3_column_int64(stmt.handle, 0);
     }
 
+    fn scalarOneParamLocked(self: *Db, sql: [:0]const u8, a: i64) !i64 {
+        var stmt = try self.prepare(sql);
+        defer stmt.deinit();
+        try stmt.bindInt(1, a);
+        if (try stmt.step() != c.SQLITE_ROW) return error.Sqlite;
+        return c.sqlite3_column_int64(stmt.handle, 0);
+    }
+
+    fn scalarTwoParamLocked(self: *Db, sql: [:0]const u8, a: i64, b: i64) !i64 {
+        var stmt = try self.prepare(sql);
+        defer stmt.deinit();
+        try stmt.bindInt(1, a);
+        try stmt.bindInt(2, b);
+        if (try stmt.step() != c.SQLITE_ROW) return error.Sqlite;
+        return c.sqlite3_column_int64(stmt.handle, 0);
+    }
+
+    pub const PurgeOptions = struct {
+        /// Newest revisions kept per note regardless of age/labels.
+        keep_last: usize,
+        /// 0 disables the age test; otherwise only revisions older than this
+        /// many days may be removed.
+        older_than_days: u32 = 0,
+        /// False performs a dry run in a transaction and rolls it back.
+        apply: bool = false,
+    };
+
+    pub const PurgeResult = struct {
+        notes_scanned: usize = 0,
+        revisions_removed: i64 = 0,
+        labelled_protected: i64 = 0,
+        floors_updated: usize = 0,
+        verified: bool = false,
+        applied: bool = false,
+    };
+
+    /// Explicit prefix retention. Per note, keep the newest `keep_last`
+    /// revisions, every labelled revision, and every revision newer than the
+    /// age cutoff. Only the contiguous unlabelled prefix older than all of
+    /// those is removed, so revision numbers stay contiguous above a recorded
+    /// floor. Never runs automatically; `apply=false` rolls back after
+    /// verification.
+    pub fn purgeHistory(self: *Db, now: i64, options: PurgeOptions) !PurgeResult {
+        if (options.keep_last < 1) return error.InvalidRetentionPolicy;
+        const keep_last: i64 = @intCast(options.keep_last);
+        const cutoff = now - @as(i64, @intCast(options.older_than_days)) * std.time.s_per_day;
+
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        try self.execRaw("BEGIN IMMEDIATE;");
+        errdefer _ = self.execRaw("ROLLBACK;") catch {};
+        var result = PurgeResult{};
+        const labelled_before = try self.scalarLocked("SELECT COUNT(*) FROM note_revisions WHERE label <> ''");
+        result.labelled_protected = labelled_before;
+
+        var note_ids: std.ArrayList(i64) = .empty;
+        defer note_ids.deinit(self.allocator);
+        {
+            var stmt = try self.prepare("SELECT id FROM notes ORDER BY id");
+            defer stmt.deinit();
+            while (try stmt.step() == c.SQLITE_ROW) {
+                try note_ids.append(self.allocator, c.sqlite3_column_int64(stmt.handle, 0));
+            }
+        }
+
+        for (note_ids.items) |note_id| {
+            result.notes_scanned += 1;
+            const total = try self.scalarOneParamLocked(
+                "SELECT COUNT(*) FROM note_revisions WHERE note_id = ?",
+                note_id,
+            );
+            if (total == 0) continue;
+            const oldest = try self.scalarOneParamLocked(
+                "SELECT MIN(revision_no) FROM note_revisions WHERE note_id = ?",
+                note_id,
+            );
+            const newest_keep = try self.scalarTwoParamLocked(
+                \\SELECT MIN(revision_no) FROM (
+                \\  SELECT revision_no FROM note_revisions WHERE note_id = ?
+                \\  ORDER BY revision_no DESC LIMIT ?
+                \\)
+            , note_id, keep_last);
+            var floor = newest_keep;
+            const first_label = try self.scalarOneParamLocked(
+                "SELECT COALESCE(MIN(revision_no), 0) FROM note_revisions WHERE note_id = ? AND label <> ''",
+                note_id,
+            );
+            if (first_label > 0 and first_label < floor) floor = first_label;
+            if (options.older_than_days > 0) {
+                const first_too_young = try self.scalarTwoParamLocked(
+                    \\SELECT COALESCE(MIN(revision_no), 0) FROM note_revisions
+                    \\WHERE note_id = ? AND label = '' AND created_at >= ?
+                , note_id, cutoff);
+                if (first_too_young > 0 and first_too_young < floor) floor = first_too_young;
+            }
+            if (floor <= oldest) continue;
+
+            const removed: i64 = blk: {
+                var del = try self.prepare(
+                    "DELETE FROM note_revisions WHERE note_id = ? AND revision_no < ? AND label = ''",
+                );
+                defer del.deinit();
+                try del.bindInt(1, note_id);
+                try del.bindInt(2, floor);
+                if (try del.step() != c.SQLITE_DONE) return error.Sqlite;
+                break :blk @intCast(c.sqlite3_changes(self.handle));
+            };
+            if (removed == 0) continue;
+
+            {
+                var upsert = try self.prepare(
+                    \\INSERT INTO note_history_retention(note_id, floor_revision, purged_at, purged_count)
+                    \\VALUES(?, ?, ?, ?)
+                    \\ON CONFLICT(note_id) DO UPDATE SET
+                    \\  floor_revision = excluded.floor_revision,
+                    \\  purged_at = excluded.purged_at,
+                    \\  purged_count = note_history_retention.purged_count + excluded.purged_count
+                );
+                defer upsert.deinit();
+                try upsert.bindInt(1, note_id);
+                try upsert.bindInt(2, floor);
+                try upsert.bindInt(3, now);
+                try upsert.bindInt(4, removed);
+                if (try upsert.step() != c.SQLITE_DONE) return error.Sqlite;
+            }
+
+            result.revisions_removed += removed;
+            result.floors_updated += 1;
+        }
+
+        result.verified = try self.verifyRetentionLocked(labelled_before);
+        if (options.apply and result.verified) {
+            try self.execRaw("COMMIT;");
+            result.applied = true;
+        } else {
+            try self.execRaw("ROLLBACK;");
+        }
+        return result;
+    }
+
+    fn verifyRetentionLocked(self: *Db, labelled_before: i64) !bool {
+        var ok = true;
+        const labelled_after = try self.scalarLocked("SELECT COUNT(*) FROM note_revisions WHERE label <> ''");
+        ok = ok and labelled_after == labelled_before;
+
+        const missing_history = try self.scalarLocked(
+            "SELECT COUNT(*) FROM notes n WHERE NOT EXISTS (SELECT 1 FROM note_revisions r WHERE r.note_id = n.id)",
+        );
+        ok = ok and missing_history == 0;
+
+        const broken_chains = try self.scalarLocked(
+            \\SELECT COUNT(*) FROM (
+            \\  SELECT r.note_id AS note_id, MIN(r.revision_no) AS lo, MAX(r.revision_no) AS hi, COUNT(*) AS n
+            \\  FROM note_revisions r GROUP BY r.note_id
+            \\) c LEFT JOIN note_history_retention h ON h.note_id = c.note_id
+            \\WHERE c.lo <> COALESCE(h.floor_revision, 1) OR c.hi <> c.lo + c.n - 1
+        );
+        ok = ok and broken_chains == 0;
+
+        const bad_floors = try self.scalarLocked(
+            \\SELECT COUNT(*) FROM note_history_retention h
+            \\LEFT JOIN note_revisions lo ON lo.note_id = h.note_id AND lo.revision_no = h.floor_revision
+            \\LEFT JOIN (
+            \\  SELECT note_id, MAX(revision_no) AS hi FROM note_revisions GROUP BY note_id
+            \\) x ON x.note_id = h.note_id
+            \\WHERE h.floor_revision <= 1 OR lo.id IS NULL OR h.floor_revision > x.hi
+        );
+        ok = ok and bad_floors == 0;
+
+        const orphan_assets = try self.scalarLocked(
+            "SELECT COUNT(*) FROM revision_assets a LEFT JOIN attachments t ON t.id = a.attachment_id WHERE t.id IS NULL",
+        );
+        ok = ok and orphan_assets == 0;
+
+        var integrity = try self.prepare("PRAGMA integrity_check");
+        defer integrity.deinit();
+        const integrity_ok = if (try integrity.step() == c.SQLITE_ROW) blk: {
+            const text = c.sqlite3_column_text(integrity.handle, 0);
+            break :blk text != null and std.mem.eql(u8, std.mem.span(text), "ok");
+        } else false;
+        return ok and integrity_ok;
+    }
+
     /// Read-only whole-database verification. Returns false if any check fails;
     /// the writer receives one PASS/FAIL line per invariant.
     pub fn diagnose(self: *Db, writer: *std.Io.Writer) !bool {
@@ -1426,7 +1628,7 @@ pub const Db = struct {
         try writer.writeAll("FeatherNote database doctor\n");
         const schema_version = try self.schemaVersion();
         try writer.print("schema version: {d}\n", .{schema_version});
-        try reportCheck(writer, &ok, schema_version >= 1 and schema_version <= 5, "schema version is supported");
+        try reportCheck(writer, &ok, schema_version >= 1 and schema_version <= 6, "schema version is supported");
 
         var integrity = try self.prepare("PRAGMA integrity_check");
         const integrity_ok = blk: {
@@ -1455,14 +1657,23 @@ pub const Db = struct {
         try writer.print("notes without revisions: {d}\n", .{missing_history});
         try reportCheck(writer, &ok, missing_history == 0, "every note has a revision chain");
 
-        const broken_chains = try self.scalarLocked(
-            \\SELECT COUNT(*) FROM (
-            \\  SELECT note_id FROM note_revisions GROUP BY note_id
-            \\  HAVING MIN(revision_no) <> 1 OR MAX(revision_no) <> COUNT(*) OR COUNT(*) <> MAX(revision_no)
-            \\)
-        );
+        const broken_chains = if (schema_version >= 6)
+            try self.scalarLocked(
+                \\SELECT COUNT(*) FROM (
+                \\  SELECT r.note_id AS note_id, MIN(r.revision_no) AS lo, MAX(r.revision_no) AS hi, COUNT(*) AS n
+                \\  FROM note_revisions r GROUP BY r.note_id
+                \\) c LEFT JOIN note_history_retention h ON h.note_id = c.note_id
+                \\WHERE c.lo <> COALESCE(h.floor_revision, 1) OR c.hi <> c.lo + c.n - 1
+            )
+        else
+            try self.scalarLocked(
+                \\SELECT COUNT(*) FROM (
+                \\  SELECT note_id FROM note_revisions GROUP BY note_id
+                \\  HAVING MIN(revision_no) <> 1 OR MAX(revision_no) <> COUNT(*) OR COUNT(*) <> MAX(revision_no)
+                \\)
+            );
         try writer.print("broken revision chains: {d}\n", .{broken_chains});
-        try reportCheck(writer, &ok, broken_chains == 0, "revision numbers are contiguous from 1");
+        try reportCheck(writer, &ok, broken_chains == 0, "revision numbers are contiguous above any retention floor");
 
         var checksum_stmt = try self.prepare("SELECT title, body, checksum FROM note_revisions");
         var checksum_mismatches: i64 = 0;
@@ -1515,6 +1726,19 @@ pub const Db = struct {
 
         const bad_labels = try self.scalarLocked("SELECT COUNT(*) FROM note_revisions WHERE length(label) > 80");
         try reportCheck(writer, &ok, bad_labels == 0, "checkpoint labels are within bounds");
+
+        if (schema_version >= 6) {
+            const bad_floors = try self.scalarLocked(
+                \\SELECT COUNT(*) FROM note_history_retention h
+                \\LEFT JOIN note_revisions lo ON lo.note_id = h.note_id AND lo.revision_no = h.floor_revision
+                \\LEFT JOIN (
+                \\  SELECT note_id, MAX(revision_no) AS hi FROM note_revisions GROUP BY note_id
+                \\) x ON x.note_id = h.note_id
+                \\WHERE h.floor_revision <= 1 OR lo.id IS NULL OR h.floor_revision > x.hi
+            );
+            try writer.print("invalid retention floors: {d}\n", .{bad_floors});
+            try reportCheck(writer, &ok, bad_floors == 0, "retention floors point at a kept revision");
+        }
 
         return ok;
     }
@@ -1746,18 +1970,108 @@ test "v4 migration seeds one baseline revision without fabricating history" {
     try db.execRaw("ALTER TABLE attachments DROP COLUMN deleted_at;");
     try db.execRaw("DROP TABLE revision_assets;");
     try db.execRaw("DROP TABLE note_revisions;");
+    try db.execRaw("DROP TABLE note_history_retention;");
     try db.execRaw("UPDATE schema_meta SET version = 3;");
     db.close(testing.allocator);
 
     db = try Db.open(testing.allocator, io, db_path);
     defer db.close(testing.allocator);
-    try testing.expectEqual(@as(i64, 5), try db.schemaVersion());
+    try testing.expectEqual(@as(i64, 6), try db.schemaVersion());
     try testing.expectEqual(@as(i64, 1), try db.countRevisions(id));
     const baseline = (try db.getRevision(arena, id, 1)).?;
     try testing.expectEqual(RevisionAction.baseline, baseline.action);
     try testing.expectEqual(Origin.system, baseline.origin);
     try testing.expectEqualStrings("old body", baseline.body);
     try testing.expectEqual(@as(i64, 2000), baseline.created_at);
+}
+
+test "retention purge keeps labels, heads and a verified floor" {
+    const testing = std.testing;
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try std.fs.path.join(testing.allocator, &.{ ".zig-cache/tmp", &tmp.sub_path, "retention.db" });
+    defer testing.allocator.free(db_path);
+
+    const database = try Db.open(testing.allocator, io, db_path);
+    defer database.close(testing.allocator);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const id = try database.createNoteFrom(arena, "v1", "body 1", 1000, .web);
+    for (2..11) |version| {
+        try testing.expectEqual(WriteResult.ok, try database.updateNoteFrom(
+            id,
+            @intCast(version - 1),
+            try std.fmt.allocPrint(arena, "v{d}", .{version}),
+            try std.fmt.allocPrint(arena, "body {d}", .{version}),
+            1000 + @as(i64, @intCast(version)),
+            .web,
+        ));
+    }
+    try testing.expect(try database.setRevisionLabel(id, 6, "keep me"));
+    try testing.expectEqual(@as(i64, 10), try database.countRevisions(id));
+
+    // Dry run proves the plan but commits nothing.
+    const dry = try database.purgeHistory(2000, .{ .keep_last = 2 });
+    try testing.expectEqual(@as(i64, 5), dry.revisions_removed);
+    try testing.expect(dry.verified);
+    try testing.expect(!dry.applied);
+    try testing.expectEqual(@as(i64, 10), try database.countRevisions(id));
+    try testing.expectEqual(@as(i64, 1), try database.historyFloor(id));
+
+    // Labels pin the floor: r6 is kept even though only two newest are wanted.
+    const applied = try database.purgeHistory(2000, .{ .keep_last = 2, .apply = true });
+    try testing.expectEqual(@as(i64, 5), applied.revisions_removed);
+    try testing.expect(applied.verified and applied.applied);
+    try testing.expectEqual(@as(i64, 5), try database.countRevisions(id));
+    try testing.expectEqual(@as(i64, 6), try database.historyFloor(id));
+    try testing.expect((try database.getRevision(arena, id, 6)) != null);
+    try testing.expectEqualStrings("keep me", (try database.getRevision(arena, id, 6)).?.label);
+    try testing.expect((try database.getRevision(arena, id, 1)) == null);
+    try testing.expectEqual(@as(i64, 10), (try database.getNote(arena, id, false)).?.version);
+
+    // A second pass cannot move the floor past the labelled checkpoint.
+    const again = try database.purgeHistory(2001, .{ .keep_last = 1, .apply = true });
+    try testing.expectEqual(@as(i64, 0), again.revisions_removed);
+    try testing.expectEqual(@as(i64, 6), try database.historyFloor(id));
+
+    var doctor = std.Io.Writer.Allocating.init(testing.allocator);
+    defer doctor.deinit();
+    try testing.expect(try database.diagnose(&doctor.writer));
+    try testing.expect(std.mem.find(u8, doctor.written(), "PASS retention floors point at a kept revision") != null);
+}
+
+test "retention age policy keeps young revisions" {
+    const testing = std.testing;
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try std.fs.path.join(testing.allocator, &.{ ".zig-cache/tmp", &tmp.sub_path, "retention-age.db" });
+    defer testing.allocator.free(db_path);
+
+    const database = try Db.open(testing.allocator, io, db_path);
+    defer database.close(testing.allocator);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const now: i64 = 100 * std.time.s_per_day;
+    const id = try database.createNoteFrom(arena, "old", "old", now - 20 * std.time.s_per_day, .web);
+    _ = try database.updateNoteFrom(id, 1, "recent", "recent", now - 2 * std.time.s_per_day, .web);
+    _ = try database.updateNoteFrom(id, 2, "head", "head", now, .web);
+
+    const result = try database.purgeHistory(now, .{
+        .keep_last = 1,
+        .older_than_days = 5,
+        .apply = true,
+    });
+    try testing.expectEqual(@as(i64, 1), result.revisions_removed);
+    try testing.expect(result.verified);
+    try testing.expectEqual(@as(i64, 2), try database.historyFloor(id));
+    try testing.expectEqual(@as(i64, 2), try database.countRevisions(id));
+    try testing.expectEqualStrings("recent", (try database.getRevision(arena, id, 2)).?.body);
 }
 
 test "database doctor accepts healthy history and rejects a bad checksum" {

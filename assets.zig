@@ -6,3 +6,4 @@ pub const migration_0002 = @embedFile("migrations/0002_fts.sql");
 pub const migration_0003 = @embedFile("migrations/0003_themes_files.sql");
 pub const migration_0004 = @embedFile("migrations/0004_revisions.sql");
 pub const migration_0005 = @embedFile("migrations/0005_checkpoints.sql");
+pub const migration_0006 = @embedFile("migrations/0006_retention.sql");
