@@ -136,6 +136,17 @@ Any revision can carry a short human-readable **checkpoint label** such as
 from its content checksum, and appear in the timeline. There is no pruning job
 to accidentally remove a labelled revision.
 
+### Focus reading and printing
+
+**Focus mode** (`/notes/{id}/focus`) shows one note as a centered column with
+only a back link and its version timestamp. It reuses the same rendered prose,
+theme attributes and CSP as the normal reader, and still contains no scripts.
+
+Every page has a print stylesheet: site chrome, editing controls, history
+tables and diffs are hidden, prose is set on white at 11pt, and external link
+targets are printed after the link text. Use the browser's own Print or
+Save as PDF; FeatherNote generates no PDF server-side.
+
 ### Log in
 
 One password, no registration, no account recovery through email. If you lose

@@ -509,6 +509,49 @@ button.link:hover, .link:hover { color: var(--fg); text-decoration: underline; t
 .diff-line.added .diff-sign { color: var(--accent); }
 .diff-line code { font: inherit; }
 
+/* ---------- focus reading ---------- */
+.focus-bar {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-3);
+  max-width: 46rem; margin: 0 auto; padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--line);
+  font: 500 var(--text-sm)/1.4 var(--font-ui);
+}
+.focus-bar a { color: var(--fg); }
+.focus-bar span:nth-child(2) { font-weight: 600; }
+.focus-bar .muted { margin-left: auto; }
+.focus-main { max-width: 46rem; margin: 0 auto; padding: var(--space-12) var(--space-6); }
+.focus-head h1 { margin: 0 0 var(--space-8); font: 600 clamp(1.8rem, 4vw, 2.6rem)/1.15 var(--font-display); letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.focus-main .prose { font-size: clamp(1.02rem, 1.4vw, 1.16rem); }
+.focus-foot { max-width: 46rem; margin: 0 auto; padding: var(--space-6); border-top: 1px solid var(--line); }
+
+@media (max-width: 700px) {
+  .focus-main { padding: var(--space-8) var(--space-4); }
+  .focus-bar { padding: var(--space-3) var(--space-4); }
+  .focus-bar .muted { flex-basis: 100%; margin-left: 0; }
+}
+
+@media print {
+  :root, [data-theme] {
+    color-scheme: light;
+    --bg: #fff; --surface: #fff; --surface-2: #f3f3f3;
+    --fg: #000; --muted: #333; --line: #bbb;
+    --accent: #000; --on-accent: #fff; --danger: #000;
+  }
+  body { background: #fff !important; color: #000 !important; font-size: 11pt; }
+  .top, .foot, .rail, .tabs, .rail-actions, .secondary-actions, .upload, .files,
+  .checkpoint-form, .revision-actions, .pager, .compare-form, .skip, .focus-bar,
+  .history-table, .diff-lines { display: none !important; }
+  main, .focus-main { max-width: none; margin: 0; padding: 0; }
+  .sheet { display: block; }
+  .sheet-main { max-width: none; }
+  .prose { max-width: none; }
+  .prose a { color: #000; text-decoration: underline; }
+  .prose a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 0.85em; }
+  .prose img { max-width: 100%; }
+  .focus-head h1 { font-size: 20pt; }
+  @page { margin: 1.6cm; }
+}
+
 /* ---------- responsive ---------- */
 @media (min-width: 860px) {
   .sheet { grid-template-columns: 13rem minmax(0, 1fr); gap: var(--space-12); }
