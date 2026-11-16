@@ -127,6 +127,10 @@ does not invent history from before the upgrade. Attachments are soft-deleted,
 so old revisions keep working, and historical downloads are only served through
 a revision that actually referenced the file.
 
+Each revision can be downloaded as the exact original Markdown bytes, with a
+JSON manifest of the title, checksum and attachment SHA-256 values that snapshot
+referenced. Restoring a revision also restores the files it referenced.
+
 ### Log in
 
 One password, no registration, no account recovery through email. If you lose
@@ -311,7 +315,7 @@ server reads plaintext.
 
 ```sh
 zig build test                 # unit tests: Markdown, diff, revisions, CRUD, search
-python3 tests/integration.py   # 163 real HTTP checks, no JavaScript
+python3 tests/integration.py   # 170 real HTTP checks, no JavaScript
 python3 tests/mcp_test.py      # 52 stdio MCP protocol checks
 python3 scripts/bench.py --requests 200 --counts 100,10000
 ```
