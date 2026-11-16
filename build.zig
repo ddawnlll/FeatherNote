@@ -40,6 +40,18 @@ pub fn build(b: *std.Build) void {
             "-DSQLITE_ENABLE_FTS5",
         },
     });
+    // MD4C 0.5.3 (MIT, vendor/md4c): CommonMark + GFM tables/task lists.
+    // Zig talks to the bridge header, never to MD4C internals directly.
+    const md4c_c = b.addTranslateC(.{
+        .root_source_file = b.path("vendor/md4c/feathernote_md.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    root_module.addImport("md4c", md4c_c.createModule());
+    root_module.addCSourceFile(.{ .file = b.path("vendor/md4c/md4c.c"), .flags = &.{ "-std=c11", "-Ivendor/md4c" } });
+    root_module.addCSourceFile(.{ .file = b.path("vendor/md4c/md4c-html.c"), .flags = &.{ "-std=c11", "-Ivendor/md4c" } });
+    root_module.addCSourceFile(.{ .file = b.path("vendor/md4c/entity.c"), .flags = &.{ "-std=c11", "-Ivendor/md4c" } });
+    root_module.addCSourceFile(.{ .file = b.path("vendor/md4c/feathernote_md.c"), .flags = &.{ "-std=c11", "-Ivendor/md4c" } });
 
     const exe = b.addExecutable(.{
         .name = "feathernote",

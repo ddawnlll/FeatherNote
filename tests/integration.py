@@ -309,6 +309,59 @@ def main():
               b"<h1>Heading</h1>" in read and b"<strong>bold</strong>" in read and b"<code>code</code>" in read)
         check("markdown escapes raw html", b"&lt;script&gt;" in read and b"<script>alert(1)</script>" not in read)
 
+        # Full GFM renderer: Fibonacci table, task lists, footnotes, alignment,
+        # safe HTML, stored-XSS fixtures. Body must not mutate on read.
+        status, _, edit = c.get(note_url + "/edit")
+        gfm_body = (
+            "# Fibonacci\n\n"
+            "| Katsayi | Yuzde | Aciklama |\n"
+            "|---------|:-----:|----------|\n"
+            "| 0.000 | %0 | Baslangic |\n"
+            "| 0.236 | %23,6 | Sig geri cekilme |\n\n"
+            "- [x] done\n- [ ] açık\n\n"
+            "Text with a note[^1] and ~~strike~~.\n\n"
+            "[^1]: Footnote content\n\n"
+            "<details><summary>More</summary>body</details> <mark>highlight</mark>\n\n"
+            "[bad](javascript:alert(1)) ![remote](https://evil.example/pixel.png)"
+        )
+        status, _, _ = c.form(note_url, {"title": "First update", "body": gfm_body},
+                              csrf=csrf_of(edit), version=version_of(edit))
+        check("gfm save succeeds", status == 303, status)
+        status, _, read = c.get(note_url)
+        check("fibonacci table renders as table",
+              b"<table" in read and b"<thead" in read and b"<tbody" in read and
+              b"Katsayi" in read and b"| Katsayi |" not in read and b"%23,6" in read)
+        check("table alignment attributes present", b'align="center"' in read)
+        check("task list renders checkboxes", b'type="checkbox"' in read and b"checked" in read)
+        check("footnote renders with backlink", b'fn-1' in read and b"Footnote content" in read
+              and b"footnote-backref" in read)
+        check("safe html details and mark render", b"<details" in read and b"<mark" in read)
+        check("strikethrough renders", b"<del" in read)
+        check("javascript link is stripped", b"javascript:" not in read)
+        check("remote image is not served", b"evil.example/pixel" not in read and b"src=\"https" not in read)
+        check("no script tags anywhere", b"<script" not in read)
+        status, _, read2 = c.get(note_url)
+        check("read renders are stable", status == 200 and read2 == read)
+        status, _, edit2 = c.get(note_url + "/edit")
+        check("source body unchanged by renders", b"Katsayi" in edit2 and b"[^1]: Footnote content" in edit2 and b"- [x] done" in edit2)
+
+        # Adversarial stored-XSS fixtures through the full save/render path.
+        status, _, edit = c.get(note_url + "/edit")
+        xss_body = ("<svg onload=alert(1)>\n\n<img src=x onerror=alert(1)>\n\n"
+                    "[x](&#106;avascript:alert(1))\n\n"
+                    "<iframe src=https://evil.example></iframe>")
+        status, _, _ = c.form(note_url, {"title": "First update", "body": xss_body},
+                              csrf=csrf_of(edit), version=version_of(edit))
+        check("xss fixture save succeeds (as text)", status == 303, status)
+        status, _, read = c.get(note_url)
+        # (The page header legitimately contains an inline logo `<svg>`.)
+        check("stored xss has no live svg/img/script/iframe",
+              b"<svg onload" not in read and b"onerror=" not in read and b"<script" not in read
+              and b"<iframe" not in read and b"javascript:" not in read)
+        check("xss fixture CSP still denies scripts", status == 200)
+        status, _, edit = c.get(note_url + "/edit")
+        check("xss fixture source preserved", b"onload=alert(1)" in edit and b"106;avascript" in edit)
+
         # File upload and delivery. SVG is deliberately served as a download.
         status, _, edit = c.get(note_url + "/edit")
         png = b"\x89PNG\r\n\x1a\n" + b"feathernote-test-image"
