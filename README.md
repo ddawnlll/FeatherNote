@@ -152,9 +152,11 @@ reflow to one column.
 ### When two tabs disagree
 
 Every save carries the version it started from. If the note changed in another
-tab, FeatherNote returns **409** and shows your complete draft beside the
-latest saved version. Nothing is overwritten silently. Saving your draft over
-the latest version is a separate, explicit click.
+tab, FeatherNote returns **409** and shows three things: the exact revision
+your form started from, a diff of what was saved since then, and a diff of your
+draft. Your complete draft stays editable beside the latest version. Nothing is
+overwritten silently; saving your draft over the latest version is a separate,
+explicit click.
 
 ![The edit conflict page with both versions](docs/screenshots/conflict.png)
 
@@ -309,7 +311,7 @@ server reads plaintext.
 
 ```sh
 zig build test                 # unit tests: Markdown, diff, revisions, CRUD, search
-python3 tests/integration.py   # 160 real HTTP checks, no JavaScript
+python3 tests/integration.py   # 163 real HTTP checks, no JavaScript
 python3 tests/mcp_test.py      # 52 stdio MCP protocol checks
 python3 scripts/bench.py --requests 200 --counts 100,10000
 ```

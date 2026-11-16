@@ -425,16 +425,78 @@ pub fn editor(w: *Writer, ctx: Ctx, args: EditorArgs) !void {
     try documentEnd(w);
 }
 
-pub fn conflict(
-    w: *Writer,
-    ctx: Ctx,
+pub const ConflictArgs = struct {
     latest: db.Note,
+    base: ?db.Revision,
     draft_title: []const u8,
     draft_body: []const u8,
-) !void {
+    base_to_latest: []const diff.Row,
+    base_to_draft: []const diff.Row,
+    latest_truncated: bool = false,
+    draft_truncated: bool = false,
+};
+
+fn renderDiffLines(w: *Writer, rows: []const diff.Row, truncated: bool, limit: usize) !void {
+    if (rows.len == 0) {
+        try w.writeAll("<p class=\"muted\">No textual differences.</p>");
+        return;
+    }
+    try w.writeAll("<ol class=\"diff-lines\" aria-label=\"Unified line diff\">");
+    for (rows) |row| {
+        const cls = switch (row.kind) {
+            .same => "same",
+            .removed => "removed",
+            .added => "added",
+        };
+        const sign = switch (row.kind) {
+            .same => " ",
+            .removed => "-",
+            .added => "+",
+        };
+        const label = switch (row.kind) {
+            .same => "Unchanged line",
+            .removed => "Removed line",
+            .added => "Added line",
+        };
+        try w.writeAll("<li class=\"diff-line ");
+        try w.writeAll(cls);
+        try w.writeAll("\"><span class=\"diff-sign\" aria-hidden=\"true\">");
+        try w.writeAll(sign);
+        try w.writeAll("</span><span class=\"sr-only\">");
+        try w.writeAll(label);
+        try w.writeAll(": </span><code>");
+        try util.escapeHtml(w, row.text);
+        try w.writeAll("</code></li>");
+    }
+    try w.writeAll("</ol>\n");
+    if (truncated) {
+        try w.print("<p class=\"muted small\">The diff is long; only the first {d} lines are shown.</p>", .{limit});
+    }
+}
+
+pub fn conflict(w: *Writer, ctx: Ctx, args: ConflictArgs) !void {
+    const latest = args.latest;
     try documentStart(w, "Edit conflict", ctx, null);
     try pageHead(w, "Edit conflict", "This note changed in another tab. Your draft is preserved.");
     try errorBanner(w, "Nothing was overwritten. Compare both versions before choosing.");
+    if (args.base) |base| {
+        try w.writeAll("<section class=\"conflict-base\"><h2>Your base: revision ");
+        try w.print("{d}", .{base.revision_no});
+        try w.writeAll(" (version ");
+        try w.print("{d}", .{base.note_version});
+        try w.writeAll(")</h2><p class=\"muted small\">This is the snapshot your form started from, kept exactly as it was saved.</p><p><strong>");
+        try util.escapeHtml(w, displayTitle(base.title));
+        try w.writeAll("</strong></p><pre class=\"revision-source\">");
+        try util.escapeHtml(w, base.body);
+        try w.writeAll("</pre></section>");
+        try w.writeAll("<section class=\"conflict-diff\"><h2>Changes saved since your base</h2>");
+        try renderDiffLines(w, args.base_to_latest, args.latest_truncated, 2000);
+        try w.writeAll("</section><section class=\"conflict-diff\"><h2>Changes in your draft</h2>");
+        try renderDiffLines(w, args.base_to_draft, args.draft_truncated, 2000);
+        try w.writeAll("</section>");
+    } else {
+        try errorBanner(w, "The base snapshot could not be located. Your draft and the latest saved note are both shown below.");
+    }
     try w.writeAll("<div class=\"diff-grid\"><section class=\"diff-col\"><h2>Your draft</h2>");
     try w.writeAll("<form method=\"post\" action=\"/notes/");
     try w.print("{d}", .{latest.id});
@@ -442,9 +504,9 @@ pub fn conflict(
     try csrfField(w, ctx.csrf);
     try versionField(w, latest.version);
     try w.writeAll("<label for=\"draft-title\">Title</label><input id=\"draft-title\" name=\"title\" type=\"text\" maxlength=\"200\" value=\"");
-    try util.escapeHtml(w, draft_title);
+    try util.escapeHtml(w, args.draft_title);
     try w.writeAll("\"><label for=\"draft-body\">Draft</label><textarea id=\"draft-body\" name=\"body\" rows=\"14\">");
-    try util.escapeHtml(w, draft_body);
+    try util.escapeHtml(w, args.draft_body);
     try w.writeAll("</textarea><p class=\"muted small\">Saving replaces the latest version with this draft.</p><button type=\"submit\" class=\"danger\">Save draft over latest</button></form></section>");
 
     try w.writeAll("<section class=\"diff-col\"><h2>Latest saved version ");
@@ -455,7 +517,9 @@ pub fn conflict(
     try util.escapeHtml(w, latest.body);
     try w.writeAll("</textarea><p><a class=\"text-link\" href=\"/notes/");
     try w.print("{d}", .{latest.id});
-    try w.writeAll("\">Open the latest version</a></p></section></div>\n");
+    try w.writeAll("\">Open the latest version</a> · <a class=\"text-link\" href=\"/notes/");
+    try w.print("{d}/history", .{latest.id});
+    try w.writeAll("\">History</a></p></section></div>\n");
     try documentEnd(w);
 }
 
@@ -1077,37 +1141,7 @@ pub fn compare(w: *Writer, ctx: Ctx, args: CompareArgs) !void {
     if (args.rows.len == 0) {
         try w.writeAll("<p class=\"muted\">Both revisions are empty.</p>");
     } else {
-        try w.writeAll("<ol class=\"diff-lines\" aria-label=\"Unified line diff\">");
-        for (args.rows) |row| {
-            const cls = switch (row.kind) {
-                .same => "same",
-                .removed => "removed",
-                .added => "added",
-            };
-            const sign = switch (row.kind) {
-                .same => " ",
-                .removed => "-",
-                .added => "+",
-            };
-            const label = switch (row.kind) {
-                .same => "Unchanged line",
-                .removed => "Removed line",
-                .added => "Added line",
-            };
-            try w.writeAll("<li class=\"diff-line ");
-            try w.writeAll(cls);
-            try w.writeAll("\"><span class=\"diff-sign\" aria-hidden=\"true\">");
-            try w.writeAll(sign);
-            try w.writeAll("</span><span class=\"sr-only\">");
-            try w.writeAll(label);
-            try w.writeAll(": </span><code>");
-            try util.escapeHtml(w, row.text);
-            try w.writeAll("</code></li>");
-        }
-        try w.writeAll("</ol>\n");
-        if (args.truncated) {
-            try w.writeAll("<p class=\"muted small\">The diff is long; only the first 5,000 lines are shown. Compare closer revisions for a complete view.</p>");
-        }
+        try renderDiffLines(w, args.rows, args.truncated, 5000);
     }
     try w.writeAll("</div></div>\n");
     try documentEnd(w);
