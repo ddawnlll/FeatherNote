@@ -22,6 +22,16 @@ async function shot(page, name, opts = {}) {
   console.log('captured', name);
 }
 
+async function shotElement(page, selector, name) {
+  const element = page.locator(selector).first();
+  await element.waitFor();
+  await element.screenshot({
+    path: path.join(OUT, name),
+    animations: 'disabled',
+  });
+  console.log('captured', name);
+}
+
 // Resize the viewport to the full content height so short pages are not mostly
 // blank and tall pages are not clipped.
 async function shotFit(page, name) {
@@ -88,6 +98,15 @@ async function makeDemoImage(browser) {
   await page.click('button[type=submit]');
   await page.waitForURL('**/notes');
 
+  // Start from one live session so the inventory screenshot is stable across runs.
+  await page.goto(BASE + '/settings', { waitUntil: 'load' });
+  const revokeAll = page.locator('form[action="/settings/sessions/revoke-others"] button');
+  if (await revokeAll.count()) {
+    await revokeAll.click();
+    await page.waitForURL('**/settings?revoked_all=1');
+  }
+  await page.goto(BASE + '/notes', { waitUntil: 'load' });
+
   // 2. Light notes list
   await page.waitForTimeout(900);
   await shotFit(page, 'notes-list.png');
@@ -97,6 +116,14 @@ async function makeDemoImage(browser) {
   await page.waitForSelector('.prose');
   await page.waitForTimeout(900);
   await shotFit(page, 'note-read.png');
+
+  // 3b. Focus reading mode.
+  await page.click('a.button:has-text("Focus mode")');
+  await page.waitForSelector('.focus-main');
+  await page.waitForTimeout(500);
+  await shotFit(page, 'focus.png');
+  await page.goBack();
+  await page.waitForSelector('.prose');
 
   // 4. Editor
   await page.click('a.tab:has-text("Edit")');
@@ -124,6 +151,38 @@ async function makeDemoImage(browser) {
   await page.waitForTimeout(700);
   await shotFit(page, 'search.png');
 
+  // 6b. History with a checkpoint and a real line diff.
+  await page.goto(BASE + '/notes/new', { waitUntil: 'load' });
+  await page.fill('#title', 'Winter reading list');
+  await page.fill('#body', `Books for the short, dark evenings.
+
+- The Peregrine, J. A. Baker
+- A Philosophy of Software Design
+- Crafting Interpreters, second pass
+
+Keep this list short enough to finish.`);
+  await page.click('.editor-form button[type=submit]');
+  await page.waitForSelector('.prose');
+  for (let pass = 1; pass <= 2; pass++) {
+    await page.click('a.tab:has-text("Edit")');
+    await page.waitForSelector('#body');
+    const body = await page.inputValue('#body');
+    await page.fill('#body', body + `\n\nRevision ${pass}: keep the winter shortlist honest.`);
+    await page.click('.editor-form button[type=submit]');
+    await page.waitForSelector('.prose');
+  }
+  const readingId = page.url().split('?')[0].split('/').pop();
+  await page.goto(`${BASE}/notes/${readingId}/history/2`, { waitUntil: 'load' });
+  await page.fill('#checkpoint-label', 'Winter shortlist');
+  await page.click('.checkpoint-form button[type=submit]');
+  await page.waitForSelector('.checkpoint-form');
+  await page.goto(`${BASE}/notes/${readingId}/history`, { waitUntil: 'load' });
+  await page.waitForTimeout(500);
+  await shotFit(page, 'history.png');
+  await page.goto(`${BASE}/notes/${readingId}/compare?from=1&to=3`, { waitUntil: 'load' });
+  await page.waitForTimeout(500);
+  await shotFit(page, 'diff.png');
+
   // 7. Trash
   await page.goto(BASE + '/trash', { waitUntil: 'load' });
   await page.waitForTimeout(700);
@@ -139,7 +198,22 @@ async function makeDemoImage(browser) {
   // 9. Theme picker
   await page.goto(BASE + '/settings', { waitUntil: 'load' });
   await page.waitForTimeout(900);
-  await shotFit(page, 'themes.png');
+  await shotElement(page, '.theme-form', 'themes.png');
+
+  // 9b. A second live session makes the inventory meaningful.
+  const second = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    deviceScaleFactor: 2,
+    colorScheme: 'light',
+    javaScriptEnabled: false,
+  });
+  const secondPage = await second.newPage();
+  await login(secondPage);
+  await secondPage.close();
+  await page.goto(BASE + '/settings', { waitUntil: 'load' });
+  await page.waitForTimeout(500);
+  await shotElement(page, '.sessions', 'sessions.png');
+  await second.close();
 
   // 10. Dark notes list
   await page.click('label.theme-card:has(input[value=midnight])');
@@ -193,6 +267,12 @@ async function makeDemoImage(browser) {
   await login(mpage);
   await mpage.waitForTimeout(900);
   await shotFit(mpage, 'mobile-notes.png');
+  await mpage.click('text=Reading list');
+  await mpage.waitForSelector('.prose');
+  await mpage.click('a.button:has-text("Focus mode")');
+  await mpage.waitForSelector('.focus-main');
+  await mpage.waitForTimeout(500);
+  await shotFit(mpage, 'focus-mobile.png');
   await mobile.close();
 
   await browser.close();

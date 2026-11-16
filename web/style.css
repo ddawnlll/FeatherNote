@@ -302,7 +302,7 @@ p { margin: 0 0 var(--space-4); }
 /* ---------- article sheet ---------- */
 .sheet { display: grid; grid-template-columns: 1fr; gap: var(--space-8); }
 .sheet-main { min-width: 0; }
-.sheet-single { max-width: 52rem; }
+.sheet.sheet-single { max-width: 52rem; margin-inline: auto; grid-template-columns: minmax(0, 1fr); }
 .sheet-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; margin-bottom: var(--space-6); }
 .sheet-head h1 { margin: 0; max-width: 32ch; }
 .rail { min-width: 0; }
