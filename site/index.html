@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FeatherNote — less to hold, more to keep</title>
+  <meta name="description" content="A private, single-owner notebook. Self-hosted, server-rendered, no JavaScript, one SQLite file.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f3f0e7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#171a16" media="(prefers-color-scheme: dark)">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f3f0e7'/%3E%3Cpath d='M25 4C17 5 10 10 8 18l-2 6 4-2c2 2 5 3 8 2 6-2 9-9 7-20Z' fill='none' stroke='%2322261f' stroke-width='1.6' stroke-linejoin='round'/%3E%3Cpath d='M9 25c3-7 8-11 14-14' fill='none' stroke='%23a33a2c' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="masthead wrap">
+    <a class="brand" href="./" aria-label="FeatherNote home">
+      <svg viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <path d="M25 4C17 5 10 10 8 18l-2 6 4-2c2 2 5 3 8 2 6-2 9-9 7-20Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+        <path d="M9 25c3-7 8-11 14-14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <span>FeatherNote</span>
+    </a>
+    <nav aria-label="Main">
+      <a href="#writing">Writing</a>
+      <a href="#memory">Memory</a>
+      <a href="https://github.com/ddawnlll/FeatherNote" rel="noopener">Source <span aria-hidden="true">↗</span></a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero wrap">
+      <p class="kicker">A private notebook</p>
+      <h1>Less to hold.<br>More to keep.</h1>
+      <p class="lede">FeatherNote is a single-owner notes app that stays out of the way. Write, close the tab, come back years later. It is still here.</p>
+      <p class="meta">Self-hosted · Plain HTML · No JavaScript</p>
+    </section>
+
+    <figure class="wide shot hero-shot">
+      <img src="assets/focus.png" alt="A note in FeatherNote's distraction-free focus reading mode" width="2560" height="1380">
+      <figcaption>Focus reading. One note, one column, nothing else.</figcaption>
+    </figure>
+
+    <section class="quiet wrap">
+      <p class="breath">Nothing to manage.</p>
+      <p>No dashboards, no feeds, no notifications. No tags to maintain before you are allowed to write something down.</p>
+    </section>
+
+    <section class="feature wrap" id="writing">
+      <div class="feature-copy">
+        <p class="index">01 / Writing</p>
+        <h2>Write first. Sort it out later.</h2>
+        <p>Markdown, rendered on the server. Headings, lists, tables, task lists, footnotes, code, and links. A plain source editor, an optional block editor, and a preview that saves nothing.</p>
+        <p class="small">No toolbar to learn. No autosave race. No JavaScript.</p>
+      </div>
+      <figure class="shot">
+        <img src="assets/notes-list.png" alt="FeatherNote notes list with pinned and recent notes" width="2560" height="2094" loading="lazy">
+        <figcaption>The index is a ruled page, not a dashboard.</figcaption>
+      </figure>
+    </section>
+
+    <section class="feature reverse wrap" id="memory">
+      <div class="feature-copy">
+        <p class="index">02 / Memory</p>
+        <h2>Every version is still there.</h2>
+        <p>Each meaningful save becomes a full, immutable snapshot. Compare any two revisions, name a checkpoint, or restore an old draft as a new one. Nothing is rewritten behind your back.</p>
+        <p class="small">History is kept by default. Purging is explicit, verified, and never removes a named checkpoint.</p>
+      </div>
+      <figure class="shot">
+        <img src="assets/history.png" alt="Revision history with a named checkpoint and an immutable snapshot" width="2560" height="1664" loading="lazy">
+        <figcaption>A quiet timeline, with real dates and origins.</figcaption>
+      </figure>
+    </section>
+
+    <section class="feature wrap" id="privacy">
+      <div class="feature-copy">
+        <p class="index">03 / Privacy</p>
+        <h2>Yours, and no one else's.</h2>
+        <p>One password protects the whole notebook. Sessions live on your server. Every mutation carries a CSRF token. Active browsers can be reviewed and revoked one at a time.</p>
+        <p class="small">Notes and files stay in one SQLite file. Backups are checked before they are trusted.</p>
+      </div>
+      <figure class="shot">
+        <img src="assets/sessions.png" alt="Active session list with a current browser and revoke controls" width="2240" height="636" loading="lazy">
+        <figcaption>See every signed-in browser. Keep only the ones you know.</figcaption>
+      </figure>
+    </section>
+
+    <section class="quiet end-quiet wrap">
+      <p class="breath">One binary.<br>One database.<br>One person.</p>
+      <p>FeatherNote does not ask for an account, a subscription, or a connection to somebody else's computer.</p>
+    </section>
+
+    <section class="invite wrap">
+      <p class="kicker">Open source</p>
+      <h2>Take it with you.</h2>
+      <p>Read the code, run it on your own machine, and keep the backup as a single file.</p>
+      <a class="button" href="https://github.com/ddawnlll/FeatherNote">github.com/ddawnlll/FeatherNote <span aria-hidden="true">↗</span></a>
+    </section>
+  </main>
+
+  <footer class="footer wrap">
+    <p>FeatherNote</p>
+    <nav aria-label="Footer">
+      <a href="https://github.com/ddawnlll/FeatherNote" rel="noopener">Source</a>
+      <a href="https://github.com/ddawnlll/FeatherNote#readme" rel="noopener">Documentation</a>
+    </nav>
+    <p class="small">This page is plain HTML and CSS. No scripts. No trackers.</p>
+  </footer>
+</body>
+</html>
