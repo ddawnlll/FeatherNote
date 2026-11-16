@@ -755,6 +755,74 @@ def main():
         finally:
             stop_server(restore_proc)
 
+        # Issue #6 F12: explicit retention purge protects labelled checkpoints.
+        # Run at the end because it trims history for every note in the database.
+        status, _, new_form = wc.get("/notes/new")
+        status, headers, _ = wc.form("/notes", {"title": "Retention note", "body": "r1"},
+                                     csrf=csrf_of(new_form))
+        ret_url = headers.get("location", "").split("?")[0]
+        for i in (2, 3):
+            status, _, edit = wc.get(ret_url + "/edit")
+            status, _, _ = wc.form(ret_url, {"title": f"Retention r{i}", "body": f"body r{i}"},
+                                   csrf=csrf_of(edit), version=version_of(edit))
+            check(f"retention fixture revision {i}", status == 303, status)
+        status, _, rev2 = wc.get(ret_url + "/history/2")
+        status, _, _ = wc.form(ret_url + "/history/2/label", {"label": "pinned checkpoint"},
+                               csrf=csrf_of(rev2))
+        check("retention checkpoint saved", status == 303, status)
+
+        dry = subprocess.run([binary, "admin", "purge-history", "--db", db_path,
+                              "--keep-last", "1"],
+                             capture_output=True, text=True, cwd=ROOT)
+        dry_out = dry.stdout + dry.stderr
+        dry_match = re.search(r"would be removed: (\d+)", dry_out)
+        dry_count = int(dry_match.group(1)) if dry_match else -1
+        check("retention dry run verifies without committing",
+              dry.returncode == 0 and "dry run" in dry_out and dry_count > 0
+              and "verification: PASS" in dry_out, dry_out)
+        status, _, still = wc.get(ret_url + "/history")
+        check("retention dry run leaves history intact", b"r1" in still and b"r3" in still)
+
+        applied = subprocess.run([binary, "admin", "purge-history", "--db", db_path,
+                                  "--keep-last", "1", "--apply"],
+                                 capture_output=True, text=True, cwd=ROOT)
+        applied_out = applied.stdout + applied.stderr
+        applied_match = re.search(r"revisions removed: (\d+)", applied_out)
+        applied_count = int(applied_match.group(1)) if applied_match else -1
+        check("retention apply removes the verified prefix",
+              applied.returncode == 0 and applied_count == dry_count
+              and "verification: PASS" in applied_out, applied_out)
+        status, _, purged_history = wc.get(ret_url + "/history")
+        check("history reports the retention floor",
+              b"Revisions before r2 were removed" in purged_history
+              and b"Checkpoint: pinned checkpoint" in purged_history)
+        status, _, _ = wc.get(ret_url + "/history/1")
+        check("purged revision is gone", status == 404, status)
+        status, _, head_page = wc.get(ret_url)
+        check("head note survives retention", status == 200 and b"body r3" in head_page)
+
+        again = subprocess.run([binary, "admin", "purge-history", "--db", db_path,
+                                "--keep-last", "1", "--apply"],
+                               capture_output=True, text=True, cwd=ROOT)
+        again_out = again.stdout + again.stderr
+        check("labelled checkpoint blocks further purge",
+              again.returncode == 0 and "revisions removed: 0" in again_out,
+              f"rc={again.returncode}\n{again_out}")
+        missing_path = os.path.join(work, "missing.db")
+        missing = subprocess.run([binary, "admin", "purge-history", "--db", missing_path,
+                                  "--keep-last", "1"],
+                                 capture_output=True, text=True, cwd=ROOT)
+        check("purge refuses to create a missing database",
+              missing.returncode != 0 and not os.path.exists(missing_path),
+              f"rc={missing.returncode}\n{missing.stdout}{missing.stderr}")
+        doctor = subprocess.run([binary, "admin", "doctor", "--db", db_path],
+                                capture_output=True, text=True, cwd=ROOT)
+        doctor_out = doctor.stdout + doctor.stderr
+        check("doctor accepts a purged history with a floor",
+              doctor.returncode == 0 and "retention floors" in doctor_out
+              and "FAIL" not in doctor_out,
+              f"rc={doctor.returncode}\n{doctor_out}")
+
         # No sensitive material in logs.
         log_text = open(log_path, "rb").read()
         check("password absent from logs", PASSWORD.encode() not in log_text)

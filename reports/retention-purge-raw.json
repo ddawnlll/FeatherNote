@@ -1,0 +1,15 @@
+{
+  "revisions": 100000,
+  "keep_last": 100,
+  "database_bytes_before": 19451904,
+  "database_bytes_after": 19451904,
+  "dry_run_ms": 1435.2,
+  "apply_ms": 1466.1,
+  "doctor_ms": 10.2,
+  "dry_run_output": "History retention (dry run)\n  notes scanned: 1\n  revisions that would be removed: 99900\n  labelled revisions protected: 0\n  per-note retention floors updated: 1\n  verification: PASS\nNothing was committed. Rerun with --apply to purge.\n",
+  "apply_output": "History retention (applied)\n  notes scanned: 1\n  revisions removed: 99900\n  labelled revisions protected: 0\n  per-note retention floors updated: 1\n  verification: PASS\n",
+  "dry_run_ok": true,
+  "apply_ok": true,
+  "doctor_ok": true,
+  "note": "single operation on one VM; database file does not shrink without VACUUM"
+}

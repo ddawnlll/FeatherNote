@@ -47,13 +47,13 @@ FeatherNote stays a **self-hosted, single-owner, Markdown-canonical notebook**: 
 - [ ] **F03** Escaped accessible line-level unified and side-by-side diffs; Unicode, long lines and safe links
 - [ ] **F04** Compare any two historical revisions without mutation
 - [ ] **F05** Restore an old revision as a NEW revision using expected current version and explicit confirmation
-- [ ] **F06** Optional named checkpoints protected from unintended pruning
+- [x] **F06** Optional named checkpoints protected from unintended pruning
 - [ ] **F07** Provenance metadata for Web/MCP/import/admin without exposing content in operational logs
 - [ ] **F08** Immutable historical asset references and safe reachability/garbage collection
 - [ ] **F09** Deletion, trash, archive and recovery actions recorded as versioned events
 - [ ] **F10** Explicit base/latest/draft three-way conflict resolution; never silently overwrite
 - [ ] **F11** Download precise historical Markdown bytes and associated asset manifest
-- [ ] **F12** History retained by default; explicit retention policy, protected checkpoints and purge verification
+- [x] **F12** History retained by default; explicit retention policy, protected checkpoints and purge verification
 
 ### Markdown & Rich Editor — [#7](https://github.com/ddawnlll/FeatherNote/issues/7)
 
@@ -118,10 +118,10 @@ FeatherNote stays a **self-hosted, single-owner, Markdown-canonical notebook**: 
 **Delivery:** v2.1 P1; essential surfaces v2.0
 
 - [ ] **F51** 320px-to-desktop responsive index, reader, editor, history, diff, search and files
-- [ ] **F52** Distraction-free Focus Reading Mode with semantic accessible prose
+- [x] **F52** Distraction-free Focus Reading Mode with semantic accessible prose
 - [ ] **F53** Compact desktop sidebar and native mobile navigation without JavaScript
 - [ ] **F54** Subtle progressive CSS page transitions; reduced-motion respected everywhere
-- [ ] **F55** Print-friendly stylesheet and browser-native PDF output
+- [x] **F55** Print-friendly stylesheet and browser-native PDF output
 - [ ] **F56** Turkish/English strings and explicit timezone/date/number formatting
 - [ ] **F57** Keyboard/screen-reader and WCAG-oriented audit across all 12 themes
 
