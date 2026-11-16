@@ -130,10 +130,10 @@ FeatherNote stays a **self-hosted, single-owner, Markdown-canonical notebook**: 
 **Delivery:** v2.0 P0 / v2.1 P1
 
 - [ ] **F58** Configurable systemd scheduled online SQLite backups and retention
-- [ ] **F59** Verified backups and isolated restore drill including revision/blob hash checks
+- [x] **F59** Verified backups and isolated restore drill including revision/blob hash checks
 - [ ] **F60** Versioned portable export of all notes, histories, metadata and attachments
 - [ ] **F61** Staged dry-run import from Markdown and Obsidian-like folders with link remapping
-- [ ] **F62** Read-only database doctor: integrity, FK, schema, FTS, revisions, blob reachability
+- [x] **F62** Read-only database doctor: integrity, FK, schema, FTS, revisions, blob reachability
 - [ ] **F63** Redaction-safe provenance/audit event ledger for Web, MCP, import and admin mutations
 - [ ] **F64** Per-session inventory and CSRF-protected selective/all revocation
 - [ ] **F65** Optional operator-held-key encrypted offsite backups; no false E2EE claim

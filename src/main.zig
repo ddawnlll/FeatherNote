@@ -1804,6 +1804,23 @@ fn adminBackup(gpa: Allocator, io: Io, db_path: []const u8, out_path: []const u8
         return err;
     };
     std.debug.print("Backup written to {s}; PRAGMA integrity_check = ok.\n", .{out_path});
+    const verification = db.Db.openReadOnly(gpa, io, out_path) catch |err| {
+        std.debug.print("backup verification could not open the destination: {t}\n", .{err});
+        return err;
+    };
+    defer verification.close(gpa);
+    var aw = std.Io.Writer.Allocating.init(gpa);
+    defer aw.deinit();
+    const verified = verification.diagnose(&aw.writer) catch |err| {
+        std.debug.print("backup doctor failed: {t}\n", .{err});
+        return err;
+    };
+    std.debug.print("{s}", .{aw.written()});
+    if (!verified) {
+        std.debug.print("Backup did NOT pass the doctor; do not rely on it.\n", .{});
+        return error.BackupVerificationFailed;
+    }
+    std.debug.print("Backup passed the doctor (revision checksums and attachment hashes).\n", .{});
 }
 
 fn adminIntegrity(gpa: Allocator, io: Io, db_path: []const u8) !void {

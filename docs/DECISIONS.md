@@ -221,3 +221,17 @@ and `PRAGMA integrity_check` passes. A failure rolls back. There is no timer,
 no daemon, and no retention in the web or MCP surface; an operator with database
 access performs it. History pages state the floor when it is above r1, and
 compare rejects revisions below it.
+
+## D025 — Backups are only successful after the doctor passes
+
+`admin backup` uses SQLite's online backup API, then opens the destination
+read-only and runs the same doctor as `admin doctor`. Success is printed only
+if every check passes; otherwise the command exits non-zero and says the file
+is unsafe. The doctor now recomputes SHA-256 over every attachment blob and
+compares it with the stored hash and size, not just the hash's length. This
+catches silent byte corruption that `PRAGMA integrity_check` cannot see.
+
+The restore drill in `tests/integration.py` takes an online backup while a
+writer is active, runs the doctor on it, copies it to a separate directory,
+starts a second server on the copy, logs in and reads the restored note. The
+backup command does not truncate, move or overwrite the source database.

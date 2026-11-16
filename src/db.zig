@@ -1724,6 +1724,26 @@ pub const Db = struct {
         try writer.print("attachments with size/hash shape mismatch: {d}\n", .{bad_blobs});
         try reportCheck(writer, &ok, bad_blobs == 0, "attachment size and hash shape");
 
+        var blob_stmt = try self.prepare("SELECT size, sha256, data FROM attachments");
+        var blob_hash_mismatches: i64 = 0;
+        {
+            defer blob_stmt.deinit();
+            while (try blob_stmt.step() == c.SQLITE_ROW) {
+                const size = c.sqlite3_column_int64(blob_stmt.handle, 0);
+                const stored = try self.columnText(&blob_stmt, 1, self.allocator);
+                defer self.allocator.free(stored);
+                const data = try self.columnBlob(&blob_stmt, 2, self.allocator);
+                defer self.allocator.free(data);
+                const computed = try blobChecksum(self.allocator, data);
+                defer self.allocator.free(computed);
+                if (size != @as(i64, @intCast(data.len)) or stored.len != 64 or !std.mem.eql(u8, stored, computed)) {
+                    blob_hash_mismatches += 1;
+                }
+            }
+        }
+        try writer.print("attachment blob hash mismatches: {d}\n", .{blob_hash_mismatches});
+        try reportCheck(writer, &ok, blob_hash_mismatches == 0, "attachment bytes match their SHA-256");
+
         const bad_labels = try self.scalarLocked("SELECT COUNT(*) FROM note_revisions WHERE length(label) > 80");
         try reportCheck(writer, &ok, bad_labels == 0, "checkpoint labels are within bounds");
 
@@ -1772,6 +1792,15 @@ fn noteChecksum(allocator: Allocator, title: []const u8, body: []const u8) ![]u8
     std.mem.writeInt(u64, &length_buf, body.len, .little);
     hasher.update(&length_buf);
     hasher.update(body);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    return allocator.dupe(u8, &hex);
+}
+
+fn blobChecksum(allocator: Allocator, data: []const u8) ![]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(data);
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     const hex = std.fmt.bytesToHex(digest, .lower);
@@ -2104,6 +2133,47 @@ test "database doctor accepts healthy history and rejects a bad checksum" {
     defer broken.deinit();
     try testing.expect(!try database.diagnose(&broken.writer));
     try testing.expect(std.mem.find(u8, broken.written(), "FAIL revision checksums match content") != null);
+}
+
+test "doctor detects attachment bytes that no longer match their hash" {
+    const testing = std.testing;
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try std.fs.path.join(testing.allocator, &.{ ".zig-cache/tmp", &tmp.sub_path, "blob-hash.db" });
+    defer testing.allocator.free(db_path);
+
+    const database = try Db.open(testing.allocator, io, db_path);
+    defer database.close(testing.allocator);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const id = try database.createNoteFrom(arena, "Blob note", "body", 4000, .web);
+    const data = "png-bytes";
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(data);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    _ = try database.insertAttachment(.{
+        .note_id = id,
+        .filename = "image.png",
+        .mime = "image/png",
+        .sha256 = &hex,
+        .data = data,
+    }, 4001);
+
+    var healthy = std.Io.Writer.Allocating.init(testing.allocator);
+    defer healthy.deinit();
+    try testing.expect(try database.diagnose(&healthy.writer));
+    try testing.expect(std.mem.find(u8, healthy.written(), "PASS attachment bytes match their SHA-256") != null);
+
+    try database.execRaw("UPDATE attachments SET data = 'bad-bytes'");
+    var broken = std.Io.Writer.Allocating.init(testing.allocator);
+    defer broken.deinit();
+    try testing.expect(!try database.diagnose(&broken.writer));
+    try testing.expect(std.mem.find(u8, broken.written(), "FAIL attachment bytes match their SHA-256") != null);
 }
 
 test "sessions and owner" {
