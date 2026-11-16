@@ -194,6 +194,8 @@ the full tool reference are in [`docs/MCP.md`](docs/MCP.md).
   `default-src 'none'`, with local styles and same-origin images only.
 - **Verified backups.** The backup command doctors the destination before it
   reports success. Restore scripts refuse to overwrite and verify first.
+- **CSS-only page transitions.** The header stays fixed while page content
+  eases between views. Reduced motion turns every animation off.
 - **One design system.** Tokens, type, spacing, and motion live in
   [`DESIGN.md`](DESIGN.md), with all twelve palettes in one stylesheet.
 

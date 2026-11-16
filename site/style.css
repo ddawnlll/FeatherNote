@@ -372,3 +372,13 @@ figcaption,
     scroll-behavior: auto;
   }
 }
+
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  section[id] {
+    scroll-margin-top: 2rem;
+  }
+}

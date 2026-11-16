@@ -249,3 +249,16 @@ it goes through Log out, which also expires the cookie. Selective revoke updates
 one row, revoke-all-others updates every other active row. There is no session
 identifier in a URL and no GET mutation, so a prefetched link cannot log a
 browser out.
+
+## D027 — Page transitions stay in CSS
+
+Navigation uses cross-document View Transitions: `@view-transition` opts in, the
+site header keeps its own name so it does not move, and `main` is named
+`page-content` so the old page eases out while the new one eases in. No script
+runs and no JavaScript is served.
+
+Browsers without `view-transition-name` get a one-shot page-load fade and rise
+through `@supports not`. Browsers with the property get the full old/new
+transition. `prefers-reduced-motion: reduce` removes all animation and
+transition, including button press feedback. The same rule is asserted by the
+HTTP suite so a future stylesheet edit cannot silently drop it.
