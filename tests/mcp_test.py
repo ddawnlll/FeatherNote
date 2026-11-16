@@ -117,10 +117,11 @@ def run(work):
 
         tools = client.request("tools/list")["result"]["tools"]
         names = {tool["name"] for tool in tools}
-        check("write mode exposes 17 tools", len(tools) == 17, len(tools))
+        check("write mode exposes 21 tools", len(tools) == 21, len(tools))
         check("all expected tools present", {
             "list_notes", "search_notes", "get_note", "create_note", "update_note",
             "append_note", "attach_file", "delete_attachment", "restore_note",
+            "list_revisions", "get_revision", "compare_revisions", "restore_revision",
         } <= names)
         check("tool schemas are objects",
               all(isinstance(tool["inputSchema"], dict) for tool in tools))
@@ -176,6 +177,22 @@ def run(work):
         })["structuredContent"]["note"]
         check("set_pinned updates state", pinned["pinned"] is True and pinned["version"] == 4)
 
+        revisions = client.call("list_revisions", {"id": note["id"]})["structuredContent"]
+        check("list_revisions returns the timeline", revisions["total"] == 4, revisions["total"])
+        check("revisions are newest first with MCP provenance",
+              revisions["revisions"][0]["revision"] == 4
+              and revisions["revisions"][0]["action"] == "pin"
+              and revisions["revisions"][0]["origin"] == "mcp")
+        first_revision = client.call("get_revision", {"id": note["id"], "revision": 1})["structuredContent"]
+        check("get_revision returns exact Markdown",
+              first_revision["revision"]["body"] == "# hello\n\nfrom mcp"
+              and len(first_revision["revision"]["checksum"]) == 64)
+        comparison = client.call("compare_revisions", {
+            "id": note["id"], "from": 1, "to": 2,
+        })["structuredContent"]
+        kinds = {line["kind"] for line in comparison["lines"]}
+        check("compare_revisions returns line kinds", {"removed", "added"} <= kinds, kinds)
+
         png = b"\x89PNG\r\n\x1a\n" + b"feathernote-mcp-image"
         attached = client.call("attach_file", {
             "note_id": note["id"], "version": 4, "filename": "pixel.png",
@@ -205,6 +222,13 @@ def run(work):
             "id": note["id"], "version": deleted["version"],
         })["structuredContent"]["note"]
         check("restore clears deleted_at", restored["deleted_at"] is None)
+
+        restored_revision = client.call("restore_revision", {
+            "id": note["id"], "version": restored["version"], "revision": 1,
+        })["structuredContent"]["note"]
+        check("restore_revision copies old Markdown",
+              restored_revision["body"] == "# hello\n\nfrom mcp"
+              and restored_revision["version"] == restored["version"] + 1)
 
         theme = client.call("set_theme", {"theme": "ink"})["structuredContent"]
         check("set_theme applies a valid id", theme["theme"] == "ink" and theme["name"] == "Ink")
@@ -241,8 +265,9 @@ def run(work):
               fallback["protocolVersion"] == "2025-06-18", fallback["protocolVersion"])
         read_tools = read_client.request("tools/list")["result"]["tools"]
         read_names = {tool["name"] for tool in read_tools}
-        check("read-only mode exposes only read tools", len(read_tools) == 8, len(read_tools))
+        check("read-only mode exposes only read tools", len(read_tools) == 11, len(read_tools))
         check("read-only mode hides create_note", "create_note" not in read_names)
+        check("read-only mode hides restore_revision", "restore_revision" not in read_names)
         refused = read_client.call("create_note", {"title": "no", "body": "no"})
         check("read-only mode refuses writes",
               refused.get("isError") is True

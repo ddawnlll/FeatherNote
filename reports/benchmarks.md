@@ -1,5 +1,39 @@
 # FeatherNote benchmark report
 
+## Re-measurement after the revision engine (2026-11-16, Issue #6)
+
+Same machine and command (`python3 scripts/bench.py --requests 200
+--counts 100,10000`). `scripts/bench.py` now also measures the history page
+(`GET /notes/{id}/history`) and a two-revision compare
+(`GET /notes/{id}/compare?from=1&to=2`), and records database bytes. The only
+intended change from the block-editor build is the revision engine: a
+transactional snapshot on every meaningful save, history/diff pages, and MCP
+revision tools.
+
+| Metric | After block editor (2026-11-12) | After revision engine (2026-11-16) | Delta |
+|---|---:|---:|---:|
+| Binary | 2,908,312 B | 2,999,704 B | +91,392 B (+3.1%) |
+| Idle RSS, 100 notes | 7,920 KiB | 8,276 KiB | +356 KiB |
+| Idle RSS, 10k notes | 8,372 KiB | 8,544 KiB | +172 KiB |
+| HWM, 100 / 10k notes | 24,248 / n/a KiB | 24,312 / 24,344 KiB | run variance |
+| GET note p95, 100 / 10k notes | 3.78 / n/a ms | 2.40 / 4.67 ms | run variance |
+| Save p95 (1 KiB body), 100 / 10k notes | 16 ms (master baseline) | 15.81 / 19.32 ms | snapshot + FTS + FULL sync |
+| History page p50/p95, 100 notes | n/a | 2.51 / 4.43 ms | 50 revisions per page, 200 requests |
+| History page p50/p95, 10k notes | n/a | 2.18 / 4.26 ms | 200 requests |
+| Compare page p50/p95, 100 / 10k notes | n/a | 1.38 / 2.36 ms, 2.48 / 6.90 ms | two snapshots + bounded line diff |
+| Database bytes, 100 / 10k notes | not recorded | 4,509,248 / 19,156,448 B | includes all seeded notes and saved revisions |
+| CSS | 25,900 B | 28,844 B | history/diff styles |
+| JS served | 0 B | 0 B | 0 |
+
+A separate 100-note run on the same VM measured save p95 27.9 ms, then
+13.1 ms, then 15.8 ms. The spread is host/VM noise, so the table uses the
+final paired run and does not claim a hard latency win. Full snapshots are the
+deliberate first storage choice; delta/dedup is not used and no database-growth
+target is claimed beyond these observations. Raw paired output is
+`reports/benchmarks-raw.json` from 2026-11-16T10:12:33Z.
+
+---
+
 ## Re-measurement after the block editor (2026-11-12, Issue #3)
 
 Same command and machine. `scripts/bench.py` now also measures the blocks

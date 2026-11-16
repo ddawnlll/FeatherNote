@@ -113,6 +113,20 @@ note back in the list with a new version.
 
 ![Trash with two deleted notes](docs/screenshots/trash.png)
 
+### History, diff and restore
+
+Every acknowledged edit appends an immutable revision: exact Markdown, title,
+pin/trash state, provenance (Web, MCP, import, admin or system), a SHA-256
+checksum and the attachment manifest at that moment. The **History** tab lists
+the timeline, any two revisions can be compared with an escaped server-rendered
+line diff, and restoring an old revision creates a new head revision rather
+than rewriting the past. A save that changes nothing creates no revision.
+
+The first migration records one honest baseline snapshot for existing notes; it
+does not invent history from before the upgrade. Attachments are soft-deleted,
+so old revisions keep working, and historical downloads are only served through
+a revision that actually referenced the file.
+
 ### Log in
 
 One password, no registration, no account recovery through email. If you lose
@@ -196,8 +210,8 @@ other MCP client can read and write notes. It is read-only unless you opt in:
 feathernote mcp --db data/feathernote.db --allow-write
 ```
 
-It exposes 17 tools, including search, read, create, append, pin, delete,
-restore, base64 attachments, and theme control, plus
+It exposes 21 tools, including search, read, create, append, pin, delete,
+restore, revision history and restore, base64 attachments, and theme control, plus
 `feathernote://notes/{id}` resources. Writes require the note version, so a
 stale update returns a conflict with the latest note instead of overwriting it.
 There is no listener and no token. Client configuration, tool reference, and
@@ -294,9 +308,9 @@ server reads plaintext.
 ## Tests and measurements
 
 ```sh
-zig build test                 # unit tests: Markdown, multipart, CRUD, search
-python3 tests/integration.py   # 88 real HTTP checks, no JavaScript
-python3 tests/mcp_test.py      # 46 stdio MCP protocol checks
+zig build test                 # unit tests: Markdown, diff, revisions, CRUD, search
+python3 tests/integration.py   # 160 real HTTP checks, no JavaScript
+python3 tests/mcp_test.py      # 52 stdio MCP protocol checks
 python3 scripts/bench.py --requests 200 --counts 100,10000
 ```
 

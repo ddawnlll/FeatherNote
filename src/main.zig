@@ -11,6 +11,7 @@ const multipart = @import("multipart.zig");
 const markdown = @import("markdown.zig");
 const blocks = @import("blocks.zig");
 const media = @import("media.zig");
+const diff = @import("diff.zig");
 const mcp = @import("mcp.zig");
 const assets = @import("assets");
 
@@ -66,6 +67,9 @@ const Query = struct {
     page: usize = 1,
     saved: bool = false,
     uploaded: bool = false,
+    from: ?i64 = null,
+    to: ?i64 = null,
+    revision: ?i64 = null,
 };
 
 const BodyError = error{ TooLarge, ExpectationFailed, ReadFailed } || Allocator.Error;
@@ -399,6 +403,12 @@ fn parseQuery(arena: Allocator, raw: ?[]const u8) !Query {
             query.saved = std.mem.eql(u8, value, "1");
         } else if (std.mem.eql(u8, name, "uploaded")) {
             query.uploaded = std.mem.eql(u8, value, "1");
+        } else if (std.mem.eql(u8, name, "from")) {
+            query.from = std.fmt.parseInt(i64, value, 10) catch null;
+        } else if (std.mem.eql(u8, name, "to")) {
+            query.to = std.fmt.parseInt(i64, value, 10) catch null;
+        } else if (std.mem.eql(u8, name, "revision")) {
+            query.revision = std.fmt.parseInt(i64, value, 10) catch null;
         }
     }
     return query;
@@ -600,7 +610,7 @@ fn dispatch(
         if (segments.next() != null) return notFound(arena, ctx);
         const id = std.fmt.parseInt(i64, id_text, 10) catch return notFound(arena, ctx);
         if (id < 1) return notFound(arena, ctx);
-        return handleFile(app, arena, ctx, id);
+        return handleFile(app, arena, ctx, id, query.revision);
     }
 
     if (std.mem.startsWith(u8, path, "/notes/")) {
@@ -642,6 +652,19 @@ fn dispatch(
             if (!known) return notFound(arena, ctx);
             if (method != .POST) return methodNotAllowed(arena, ctx, "POST");
             return handleBlocksOp(app, request, arena, ctx, id, op, content_type);
+        } else if (std.mem.eql(u8, act, "history")) {
+            if (final_action != null) return notFound(arena, ctx);
+            if (!isReadMethod(method)) return methodNotAllowed(arena, ctx, "GET, HEAD");
+            if (sub_action) |rev_text| {
+                const revision_no = std.fmt.parseInt(i64, rev_text, 10) catch return notFound(arena, ctx);
+                if (revision_no < 1) return notFound(arena, ctx);
+                return handleRevision(app, arena, ctx, id, revision_no);
+            }
+            return handleHistory(app, arena, ctx, id, query.page);
+        } else if (std.mem.eql(u8, act, "compare")) {
+            if (sub_action != null or final_action != null) return notFound(arena, ctx);
+            if (!isReadMethod(method)) return methodNotAllowed(arena, ctx, "GET, HEAD");
+            return handleCompare(app, arena, ctx, id, query);
         } else if (std.mem.eql(u8, act, "files")) {
             const sub = sub_action orelse "";
             if (final_action == null) {
@@ -664,8 +687,13 @@ fn dispatch(
             if (method == .POST) return handleDelete(app, request, arena, ctx, id, content_type);
             return methodNotAllowed(arena, ctx, "GET, HEAD, POST");
         } else if (std.mem.eql(u8, act, "restore")) {
-            if (sub_action != null or final_action != null) return notFound(arena, ctx);
+            if (final_action != null) return notFound(arena, ctx);
             if (method != .POST) return methodNotAllowed(arena, ctx, "POST");
+            if (sub_action) |rev_text| {
+                const revision_no = std.fmt.parseInt(i64, rev_text, 10) catch return notFound(arena, ctx);
+                if (revision_no < 1) return notFound(arena, ctx);
+                return handleRestoreRevision(app, request, arena, ctx, id, revision_no, content_type);
+            }
             return handleRestore(app, request, arena, ctx, id, content_type);
         }
         return notFound(arena, ctx);
@@ -836,24 +864,28 @@ fn handleUpload(
 
     const new_body = try media.appendFileLink(arena, note.body, attachment_id, filename, mime);
     if (new_body.len > util.max_body_bytes) {
-        _ = app.database.deleteAttachment(attachment_id, id) catch {};
+        _ = app.database.discardUnlinkedAttachment(attachment_id, id) catch {};
         return htmlError(arena, ctx, .payload_too_large, "Note is full", "The note is already at its 256 KiB limit. Shorten it before adding files.");
     }
     const updated = app.database.updateNote(id, note.version, note.title, new_body, nowSeconds(app.io)) catch |err| {
-        _ = app.database.deleteAttachment(attachment_id, id) catch {};
+        _ = app.database.discardUnlinkedAttachment(attachment_id, id) catch {};
         return err;
     };
     if (updated != .ok) {
-        _ = app.database.deleteAttachment(attachment_id, id) catch {};
+        _ = app.database.discardUnlinkedAttachment(attachment_id, id) catch {};
         return htmlError(arena, ctx, .conflict, "Note changed", "The note changed while the file was uploading. Reload the editor and try again.");
     }
     return .{ .status = .see_other, .location = try std.fmt.allocPrint(arena, "/notes/{d}/edit?uploaded=1", .{id}) };
 }
 
-fn handleFile(app: *App, arena: Allocator, ctx: views.Ctx, id: i64) !Response {
+fn handleFile(app: *App, arena: Allocator, ctx: views.Ctx, id: i64, revision_no: ?i64) !Response {
     const attachment = try app.database.attachment(arena, id) orelse return notFound(arena, ctx);
-    const note = try app.database.getNote(arena, attachment.meta.note_id, false) orelse return notFound(arena, ctx);
-    _ = note;
+    const note = try app.database.getNote(arena, attachment.meta.note_id, revision_no != null) orelse return notFound(arena, ctx);
+    if (revision_no) |revision| {
+        if (revision < 1 or !try app.database.revisionHasAsset(note.id, revision, id)) return notFound(arena, ctx);
+    } else if (attachment.meta.deleted_at != null) {
+        return notFound(arena, ctx);
+    }
     const is_image = media.isImage(attachment.meta.mime);
     const disposition = try std.fmt.allocPrint(arena, "{s}; filename=\"{s}\"", .{
         if (is_image) "inline" else "attachment",
@@ -935,7 +967,7 @@ fn handleCreate(app: *App, request: *http.Server.Request, arena: Allocator, ctx:
         try views.newNote(&aw.writer, ctx, title, note_body, validationMessage(err));
         return .{ .status = .bad_request, .body = aw.written() };
     };
-    const id = try app.database.createNote(arena, title, note_body, nowSeconds(app.io));
+    const id = try app.database.createNoteFrom(arena, title, note_body, nowSeconds(app.io), .web);
     const location = try std.fmt.allocPrint(arena, "/notes/{d}?saved=1", .{id});
     return .{ .status = .see_other, .location = location };
 }
@@ -1442,6 +1474,87 @@ fn handleRestore(app: *App, request: *http.Server.Request, arena: Allocator, ctx
         .ok => .{ .status = .see_other, .location = "/trash" },
         .conflict => htmlError(arena, ctx, .conflict, "Conflict", "The note changed elsewhere. Reload Trash and try again."),
         .deleted => htmlError(arena, ctx, .conflict, "Conflict", "The note changed elsewhere. Reload Trash and try again."),
+        .not_found => notFound(arena, ctx),
+    };
+}
+
+fn handleHistory(app: *App, arena: Allocator, ctx: views.Ctx, id: i64, page: usize) !Response {
+    const note = try app.database.getNote(arena, id, true) orelse return notFound(arena, ctx);
+    const rows = try app.database.listRevisions(arena, id, (page - 1) * util.page_size, util.page_size);
+    const total = try app.database.countRevisions(id);
+    var aw = std.Io.Writer.Allocating.init(arena);
+    try views.history(&aw.writer, ctx, .{ .note = note, .rows = rows, .total = total, .page = page });
+    return .{ .status = .ok, .body = aw.written() };
+}
+
+fn handleRevision(app: *App, arena: Allocator, ctx: views.Ctx, id: i64, revision_no: i64) !Response {
+    const note = try app.database.getNote(arena, id, true) orelse return notFound(arena, ctx);
+    const revision = (try app.database.getRevision(arena, id, revision_no)) orelse return notFound(arena, ctx);
+    const revision_assets = try app.database.revisionAssets(arena, id, revision_no);
+    const head = try app.database.latestRevisionNo(id);
+    var aw = std.Io.Writer.Allocating.init(arena);
+    try views.revisionDetail(&aw.writer, ctx, .{
+        .note = note,
+        .revision = revision,
+        .assets = revision_assets,
+        .head_revision = head,
+    });
+    return .{ .status = .ok, .body = aw.written() };
+}
+
+fn handleCompare(app: *App, arena: Allocator, ctx: views.Ctx, id: i64, query: Query) !Response {
+    const note = try app.database.getNote(arena, id, true) orelse return notFound(arena, ctx);
+    const head = try app.database.latestRevisionNo(id);
+    if (head < 1) return notFound(arena, ctx);
+    const from_no = query.from orelse @max(@as(i64, 1), head - 1);
+    const to_no = query.to orelse head;
+    if (from_no < 1 or to_no < 1 or from_no > head or to_no > head) {
+        return htmlError(arena, ctx, .bad_request, "Unknown revision", "Both revisions must exist in this note's history.");
+    }
+    const from_rev = (try app.database.getRevision(arena, id, from_no)) orelse return notFound(arena, ctx);
+    const to_rev = (try app.database.getRevision(arena, id, to_no)) orelse return notFound(arena, ctx);
+    const all_rows = try diff.lineDiff(arena, from_rev.body, to_rev.body);
+    const max_rendered_diff_lines: usize = 5000;
+    const rows = all_rows[0..@min(all_rows.len, max_rendered_diff_lines)];
+    var aw = std.Io.Writer.Allocating.init(arena);
+    try views.compare(&aw.writer, ctx, .{
+        .note = note,
+        .from_rev = from_rev,
+        .to_rev = to_rev,
+        .rows = rows,
+        .truncated = all_rows.len > max_rendered_diff_lines,
+    });
+    return .{ .status = .ok, .body = aw.written() };
+}
+
+fn handleRestoreRevision(
+    app: *App,
+    request: *http.Server.Request,
+    arena: Allocator,
+    ctx: views.Ctx,
+    id: i64,
+    revision_no: i64,
+    content_type: ?[]const u8,
+) !Response {
+    if (!isFormContentType(content_type)) {
+        return htmlError(arena, ctx, .unsupported_media_type, "Unsupported form", "Submit the HTML restore form.");
+    }
+    const body = readBody(request, arena) catch return bodyErrorResponse(arena, ctx, request, content_type);
+    const form = util.parseForm(arena, body) catch {
+        return htmlError(arena, ctx, .bad_request, "Malformed form", "The restore form could not be parsed.");
+    };
+    if (!csrfOk(ctx.csrf, form)) return csrfFailure(arena, ctx);
+    const version = formVersion(form) catch {
+        return htmlError(arena, ctx, .bad_request, "Bad request", "Missing or invalid note version.");
+    };
+    const result = app.database.restoreRevision(arena, id, version, revision_no, nowSeconds(app.io), .web) catch |err| switch (err) {
+        error.RevisionNotFound => return notFound(arena, ctx),
+        else => return err,
+    };
+    return switch (result) {
+        .ok => .{ .status = .see_other, .location = try std.fmt.allocPrint(arena, "/notes/{d}/history", .{id}) },
+        .conflict => htmlError(arena, ctx, .conflict, "Conflict", "The note changed elsewhere. Reload the current note and compare again before restoring."),
+        .deleted => htmlError(arena, ctx, .conflict, "Note is in Trash", "Restore the note from Trash before restoring an old revision."),
         .not_found => notFound(arena, ctx),
     };
 }

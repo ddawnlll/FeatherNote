@@ -233,8 +233,11 @@ def run_scenario(binary, count, body_size, requests, concurrency, outdir):
         save_state = {"version": version}
 
         def do_save():
+            # Vary the body so every save is a meaningful edit; exact no-op
+            # saves deliberately keep the version and append no revision.
             payload = urllib.parse.urlencode({
-                "csrf": csrf, "title": "Benchmark note", "body": "save payload " + "y" * 1024,
+                "csrf": csrf, "title": "Benchmark note",
+                "body": f"save payload {save_state['version']} " + "y" * 1024,
                 "version": save_state["version"],
             })
             status, _, _ = client.request("POST", note_url, payload)
@@ -261,8 +264,18 @@ def run_scenario(binary, count, body_size, requests, concurrency, outdir):
             })
             assert status == 200, status
 
+        def do_history():
+            status, _, _ = client.request("GET", note_url + "/history")
+            assert status == 200, status
+
+        def do_compare():
+            status, _, _ = client.request("GET", note_url + "/compare?from=1&to=2")
+            assert status == 200, status
+
         blocks_samples = measure(do_blocks_page, requests)
         preview_samples = measure(do_preview, requests)
+        history_samples = measure(do_history, requests)
+        compare_samples = measure(do_compare, requests)
         result["hwm_after_saves_kib"] = hwm_kib(proc.pid)
 
         result["get_note"] = summarize(get_samples)
@@ -271,6 +284,13 @@ def run_scenario(binary, count, body_size, requests, concurrency, outdir):
         result["save"] = summarize(save_samples)
         result["blocks_page"] = summarize(blocks_samples)
         result["preview"] = summarize(preview_samples)
+        result["history_page"] = summarize(history_samples)
+        result["compare_page"] = summarize(compare_samples)
+        result["database_bytes"] = sum(
+            os.path.getsize(db_path + suffix)
+            for suffix in ("", "-wal")
+            if os.path.exists(db_path + suffix)
+        )
 
         conc = {}
         for n in concurrency:

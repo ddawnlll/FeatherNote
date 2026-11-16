@@ -130,3 +130,39 @@ measures the blocks page and preview endpoints): binary 2,813,720 to
 KiB; blocks page GET p50/p95 1.99/2.69 ms at 100 notes and 2.04/3.53 ms at
 10,000 notes; preview POST p50/p95 2.42/5.45 ms and 2.54/5.60 ms. Zero
 bytes of frontend JavaScript are still served by every page.
+
+## D021 — Revisions are full, immutable snapshots written in the same transaction
+
+Every acknowledged semantic change (create, content edit, pin/unpin, trash,
+restore, historical restore) appends a `note_revisions` row inside the same
+`BEGIN IMMEDIATE` transaction that checks the expected `notes.version` and
+updates current state. A stale version returns 409/conflict before any row is
+written. A no-op save with the current version returns success without bumping
+the version or appending a revision. Full snapshots were chosen over deltas:
+one row is enough to recover a note, with no chain to corrupt, and the byte
+price is measured before considering dedup in a later change.
+
+Each revision stores title, exact Markdown, pin/trash state, the resulting note
+version, UTC time, validated origin (`web`, `mcp`, `import`, `admin`,
+`system`), action, a short summary, and a SHA-256 checksum over length-prefixed
+title and body. Web and MCP call the same DB writer; web blocks, uploads and
+MCP append all therefore share one revision rule.
+
+Migration `0004_revisions` is the history boundary. It creates the revision
+tables, soft-deletes attachments instead of deleting their bytes, and seeds
+exactly one `baseline` revision per existing note with its current bytes. It
+does not pretend those notes had earlier revisions. `revision_assets` records
+the live attachment manifest at each revision, so replacing or removing a file
+cannot change what an old revision referenced. Normal file URLs still hide
+removed attachments; historical downloads require the attachment to be listed
+in the requested revision (`/files/{id}/{name}?revision=N`).
+
+History UI is server-rendered: a paginated timeline, escaped revision source,
+and a bounded line diff. The diff uses an LCS matrix up to 2,000,000 cells and
+falls back to a prefix/suffix block diff above that, preventing a hostile note
+from forcing unbounded work. Restore requires CSRF and the current note
+version and creates revision N+1; it never rewrites revision N.
+Restoring a revision also clears soft-deletion for the files listed in that
+revision, because their bytes were retained; the new head therefore has a
+working attachment set again. Files added after the restored revision stay
+live and are not removed.

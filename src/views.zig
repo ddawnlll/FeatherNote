@@ -5,6 +5,7 @@ const db = @import("db.zig");
 const blocks = @import("blocks.zig");
 const markdown = @import("markdown.zig");
 const themes = @import("themes.zig");
+const diff = @import("diff.zig");
 
 const Writer = std.Io.Writer;
 
@@ -250,7 +251,9 @@ pub fn readNote(
     try w.print("{d}/edit", .{note.id});
     try w.writeAll("\">Edit</a><a class=\"tab\" href=\"/notes/");
     try w.print("{d}/blocks", .{note.id});
-    try w.writeAll("\">Blocks</a></div></header>\n");
+    try w.writeAll("\">Blocks</a><a class=\"tab\" href=\"/notes/");
+    try w.print("{d}/history", .{note.id});
+    try w.writeAll("\">History</a></div></header>\n");
     if (saved) try statusMessage(w, "Saved.");
     try w.writeAll("<div class=\"prose\">");
     if (note.body.len == 0) {
@@ -340,7 +343,9 @@ pub fn editor(w: *Writer, ctx: Ctx, args: EditorArgs) !void {
         try w.print("{d}", .{args.note.?.id});
         try w.writeAll("\">Read</a><a class=\"tab\" href=\"/notes/");
         try w.print("{d}/blocks", .{args.note.?.id});
-        try w.writeAll("\">Blocks</a></div>");
+        try w.writeAll("\">Blocks</a><a class=\"tab\" href=\"/notes/");
+        try w.print("{d}/history", .{args.note.?.id});
+        try w.writeAll("\">History</a></div>");
     }
     try w.writeAll("</header>\n");
     if (args.saved) try statusMessage(w, "Saved.");
@@ -611,7 +616,9 @@ pub fn blockEditor(w: *Writer, ctx: Ctx, args: BlocksArgs) !void {
     try w.print("{d}", .{note.id});
     try w.writeAll("\">Read</a><a class=\"tab\" href=\"/notes/");
     try w.print("{d}/edit", .{note.id});
-    try w.writeAll("\">Write</a><span class=\"tab active\">Blocks</span></div></header>\n");
+    try w.writeAll("\">Write</a><span class=\"tab active\">Blocks</span><a class=\"tab\" href=\"/notes/");
+    try w.print("{d}/history", .{note.id});
+    try w.writeAll("\">History</a></div></header>\n");
     if (args.notice) |message| try statusMessage(w, message);
     if (args.error_message) |message| try errorBanner(w, message);
     try w.writeAll("<p class=\"muted small\">Each block below edits its own Markdown on the server. Unchanged blocks keep their exact bytes; nothing is reformatted elsewhere in the note. There is no live cursor tracking: submit a block form, then keep editing. Raw blocks are the lossless source fallback for constructs this editor cannot regenerate safely (nested lists, reference definitions, indented code, HTML blocks).</p>\n");
@@ -844,6 +851,265 @@ pub fn errorPage(w: *Writer, ctx: Ctx, heading: []const u8, message: []const u8)
     try w.writeAll("</h1>\n");
     try errorBanner(w, message);
     try w.writeAll("<p><a class=\"button secondary\" href=\"/notes\">Back to notes</a></p></div>\n");
+    try documentEnd(w);
+}
+
+fn revisionActionLabel(action: db.RevisionAction) []const u8 {
+    return switch (action) {
+        .baseline => "Baseline",
+        .create => "Created",
+        .update => "Edited",
+        .pin => "Pinned",
+        .unpin => "Unpinned",
+        .delete => "Moved to Trash",
+        .restore => "Restored from Trash",
+        .restore_revision => "Revision restored",
+    };
+}
+
+fn originLabel(origin: db.Origin) []const u8 {
+    return switch (origin) {
+        .web => "Web",
+        .mcp => "MCP",
+        .import => "Import",
+        .admin => "Admin",
+        .system => "System",
+    };
+}
+
+fn historyTabs(w: *Writer, note_id: i64, active: []const u8) !void {
+    try w.writeAll("<div class=\"tabs\">");
+    const tabs = [_]struct { id: []const u8, label: []const u8, href: []const u8 }{
+        .{ .id = "read", .label = "Read", .href = "" },
+        .{ .id = "write", .label = "Edit", .href = "/edit" },
+        .{ .id = "blocks", .label = "Blocks", .href = "/blocks" },
+        .{ .id = "history", .label = "History", .href = "/history" },
+    };
+    for (tabs) |tab| {
+        if (std.mem.eql(u8, tab.id, active)) {
+            try w.writeAll("<span class=\"tab active\">");
+            try w.writeAll(tab.label);
+            try w.writeAll("</span>");
+        } else {
+            try w.writeAll("<a class=\"tab\" href=\"/notes/");
+            try w.print("{d}", .{note_id});
+            if (tab.href.len > 0) try w.writeAll(tab.href);
+            try w.writeAll("\">");
+            try w.writeAll(tab.label);
+            try w.writeAll("</a>");
+        }
+    }
+    try w.writeAll("</div>");
+}
+
+fn historyHref(w: *Writer, note_id: i64, page: usize) !void {
+    try w.writeAll("/notes/");
+    try w.print("{d}/history", .{note_id});
+    if (page > 1) try w.print("?page={d}", .{page});
+}
+
+pub const HistoryArgs = struct {
+    note: db.Note,
+    rows: []const db.RevisionRow,
+    total: i64,
+    page: usize,
+};
+
+pub fn history(w: *Writer, ctx: Ctx, args: HistoryArgs) !void {
+    try documentStart(w, "History", ctx, null);
+    try w.writeAll("<div class=\"sheet sheet-single\"><div class=\"sheet-main\"><header class=\"sheet-head\"><h1>");
+    try util.escapeHtml(w, displayTitle(args.note.title));
+    try w.writeAll("</h1>");
+    try historyTabs(w, args.note.id, "history");
+    try w.writeAll("</header>\n");
+    try w.print("<section class=\"page-head\"><h1>History</h1><p class=\"page-meta\">Every acknowledged edit is kept as an immutable snapshot. Current note version {d}, {d} revision{s}.</p></section>\n", .{
+        args.note.version,
+        args.total,
+        if (args.total == 1) "" else "s",
+    });
+
+    const head = if (args.rows.len > 0) args.rows[0].revision_no else 0;
+    if (head > 0) {
+        try w.writeAll("<form class=\"compare-form\" method=\"get\" action=\"/notes/");
+        try w.print("{d}/compare\"", .{args.note.id});
+        try w.writeAll("><h2>Compare revisions</h2><label>From <input type=\"number\" name=\"from\" min=\"1\" max=\"");
+        try w.print("{d}\" value=\"{d}\" required></label>", .{ head, @max(@as(i64, 1), head - 1) });
+        try w.writeAll("<label>To <input type=\"number\" name=\"to\" min=\"1\" max=\"");
+        try w.print("{d}\" value=\"{d}\" required></label>", .{ head, head });
+        try w.writeAll("<button type=\"submit\" class=\"button secondary\">Compare</button></form>\n");
+    }
+
+    if (args.rows.len == 0) {
+        try w.writeAll("<p class=\"muted\">No revisions yet.</p>");
+    } else {
+        try w.writeAll("<table class=\"history-table\"><caption class=\"sr-only\">Revision timeline, newest first</caption><thead><tr><th scope=\"col\">Revision</th><th scope=\"col\">When</th><th scope=\"col\">Change</th><th scope=\"col\">Origin</th><th scope=\"col\">Snapshot</th></tr></thead><tbody>\n");
+        for (args.rows) |row| {
+            try w.writeAll("<tr><th scope=\"row\"><a href=\"/notes/");
+            try w.print("{d}/history/{d}\">r{d}</a></th><td>", .{ args.note.id, row.revision_no, row.revision_no });
+            try util.formatDateFull(w, row.created_at);
+            try w.writeAll("</td><td>");
+            try util.escapeHtml(w, revisionActionLabel(row.action));
+            if (row.summary.len > 0) {
+                try w.writeAll(" <span class=\"muted small\">");
+                try util.escapeHtml(w, row.summary);
+                try w.writeAll("</span>");
+            }
+            try w.writeAll("</td><td>");
+            try util.escapeHtml(w, originLabel(row.origin));
+            try w.writeAll("</td><td class=\"snapshot-title\">");
+            try util.escapeHtml(w, displayTitle(row.title));
+            try w.writeAll("</td></tr>\n");
+        }
+        try w.writeAll("</tbody></table>\n");
+        const page_size: usize = util.page_size;
+        const total_pages: usize = if (args.total <= 0) 1 else (@as(usize, @intCast(args.total)) + page_size - 1) / page_size;
+        if (total_pages > 1) {
+            try w.writeAll("<nav class=\"pager\" aria-label=\"History pagination\">");
+            if (args.page > 1) {
+                try w.writeAll("<a rel=\"prev\" href=\"");
+                try historyHref(w, args.note.id, args.page - 1);
+                try w.writeAll("\">Newer revisions</a>");
+            }
+            try w.print("<span>Page {d} of {d}</span>", .{ args.page, total_pages });
+            if (args.page < total_pages) {
+                try w.writeAll("<a rel=\"next\" href=\"");
+                try historyHref(w, args.note.id, args.page + 1);
+                try w.writeAll("\">Older revisions</a>");
+            }
+            try w.writeAll("</nav>");
+        }
+    }
+    try w.writeAll("</div></div>\n");
+    try documentEnd(w);
+}
+
+pub const RevisionArgs = struct {
+    note: db.Note,
+    revision: db.Revision,
+    assets: []const db.RevisionAsset,
+    head_revision: i64,
+};
+
+pub fn revisionDetail(w: *Writer, ctx: Ctx, args: RevisionArgs) !void {
+    try documentStart(w, "Revision", ctx, null);
+    try w.writeAll("<div class=\"sheet sheet-single\"><div class=\"sheet-main\"><header class=\"sheet-head\"><h1>Revision ");
+    try w.print("{d}", .{args.revision.revision_no});
+    try w.writeAll("</h1>");
+    try historyTabs(w, args.note.id, "history");
+    try w.writeAll("</header>\n");
+    try w.writeAll("<dl class=\"revision-meta\"><dt>Note version</dt><dd>");
+    try w.print("{d}", .{args.revision.note_version});
+    try w.writeAll("</dd><dt>Saved</dt><dd>");
+    try util.formatDateFull(w, args.revision.created_at);
+    try w.writeAll("</dd><dt>Change</dt><dd>");
+    try util.escapeHtml(w, revisionActionLabel(args.revision.action));
+    try w.writeAll("</dd><dt>Origin</dt><dd>");
+    try util.escapeHtml(w, originLabel(args.revision.origin));
+    try w.writeAll("</dd><dt>Checksum</dt><dd><code>");
+    try util.escapeHtml(w, args.revision.checksum);
+    try w.writeAll("</code></dd></dl>\n");
+    try w.writeAll("<h2>");
+    try util.escapeHtml(w, displayTitle(args.revision.title));
+    try w.writeAll("</h2><pre class=\"revision-source\" aria-label=\"Markdown source of revision ");
+    try w.print("{d}\"", .{args.revision.revision_no});
+    try w.writeAll(">");
+    try util.escapeHtml(w, args.revision.body);
+    try w.writeAll("</pre>\n");
+
+    if (args.assets.len > 0) {
+        try w.writeAll("<section class=\"files\"><h2 class=\"rail-title\">Attachments in this revision</h2><ul class=\"file-list\">");
+        for (args.assets) |asset| {
+            try w.writeAll("<li class=\"file-row\"><a class=\"file-link\" href=\"/files/");
+            try w.print("{d}", .{asset.attachment_id});
+            try w.writeAll("/");
+            try util.urlEncode(w, asset.filename);
+            try w.print("?revision={d}\">", .{args.revision.revision_no});
+            try util.escapeHtml(w, asset.filename);
+            try w.writeAll("</a><span class=\"muted small\">");
+            try formatBytes(w, asset.size);
+            try w.writeAll(" · ");
+            try util.escapeHtml(w, asset.mime);
+            try w.writeAll("</span></li>");
+        }
+        try w.writeAll("</ul></section>\n");
+    }
+
+    try w.writeAll("<div class=\"revision-actions\"><a class=\"button secondary\" href=\"/notes/");
+    try w.print("{d}/compare?from={d}&amp;to={d}\"", .{ args.note.id, args.revision.revision_no, args.head_revision });
+    try w.writeAll(">Compare with current</a><form method=\"post\" action=\"/notes/");
+    try w.print("{d}/restore/{d}\"", .{ args.note.id, args.revision.revision_no });
+    try w.writeAll(">");
+    try csrfField(w, ctx.csrf);
+    try versionField(w, args.note.version);
+    try w.writeAll("<button type=\"submit\" class=\"primary\">Restore revision ");
+    try w.print("{d}", .{args.revision.revision_no});
+    try w.writeAll(" as a new revision</button></form></div><p class=\"muted small\">Restore never rewrites history. It copies this snapshot to a new head revision and keeps every later revision.</p>\n");
+    try w.writeAll("</div></div>\n");
+    try documentEnd(w);
+}
+
+pub const CompareArgs = struct {
+    note: db.Note,
+    from_rev: db.Revision,
+    to_rev: db.Revision,
+    rows: []const diff.Row,
+    truncated: bool = false,
+};
+
+pub fn compare(w: *Writer, ctx: Ctx, args: CompareArgs) !void {
+    try documentStart(w, "Compare revisions", ctx, null);
+    try w.writeAll("<div class=\"sheet sheet-single\"><div class=\"sheet-main\"><header class=\"sheet-head\"><h1>Compare revisions</h1>");
+    try historyTabs(w, args.note.id, "history");
+    try w.writeAll("</header>\n");
+    try w.writeAll("<p class=\"page-meta\">From r");
+    try w.print("{d}", .{args.from_rev.revision_no});
+    try w.writeAll(" to r");
+    try w.print("{d}", .{args.to_rev.revision_no});
+    try w.writeAll(". Added lines are marked +, removed lines are marked −. Nothing was changed.</p>\n");
+    try w.writeAll("<form class=\"compare-form\" method=\"get\" action=\"/notes/");
+    try w.print("{d}/compare\"", .{args.note.id});
+    try w.writeAll("><label>From <input type=\"number\" name=\"from\" min=\"1\" value=\"");
+    try w.print("{d}\" required></label>", .{args.from_rev.revision_no});
+    try w.writeAll("<label>To <input type=\"number\" name=\"to\" min=\"1\" value=\"");
+    try w.print("{d}\" required></label>", .{args.to_rev.revision_no});
+    try w.writeAll("<button type=\"submit\" class=\"button secondary\">Compare</button></form>\n");
+
+    if (args.rows.len == 0) {
+        try w.writeAll("<p class=\"muted\">Both revisions are empty.</p>");
+    } else {
+        try w.writeAll("<ol class=\"diff-lines\" aria-label=\"Unified line diff\">");
+        for (args.rows) |row| {
+            const cls = switch (row.kind) {
+                .same => "same",
+                .removed => "removed",
+                .added => "added",
+            };
+            const sign = switch (row.kind) {
+                .same => " ",
+                .removed => "-",
+                .added => "+",
+            };
+            const label = switch (row.kind) {
+                .same => "Unchanged line",
+                .removed => "Removed line",
+                .added => "Added line",
+            };
+            try w.writeAll("<li class=\"diff-line ");
+            try w.writeAll(cls);
+            try w.writeAll("\"><span class=\"diff-sign\" aria-hidden=\"true\">");
+            try w.writeAll(sign);
+            try w.writeAll("</span><span class=\"sr-only\">");
+            try w.writeAll(label);
+            try w.writeAll(": </span><code>");
+            try util.escapeHtml(w, row.text);
+            try w.writeAll("</code></li>");
+        }
+        try w.writeAll("</ol>\n");
+        if (args.truncated) {
+            try w.writeAll("<p class=\"muted small\">The diff is long; only the first 5,000 lines are shown. Compare closer revisions for a complete view.</p>");
+        }
+    }
+    try w.writeAll("</div></div>\n");
     try documentEnd(w);
 }
 

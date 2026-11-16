@@ -7,6 +7,7 @@ const std = @import("std");
 const db = @import("db.zig");
 const util = @import("http_util.zig");
 const themes = @import("themes.zig");
+const diff = @import("diff.zig");
 const media = @import("media.zig");
 
 const Allocator = std.mem.Allocator;
@@ -125,6 +126,33 @@ const tools = [_]Tool{
         .write = false,
     },
     .{
+        .name = "list_revisions",
+        .title = "List revisions",
+        .description = "List a note's immutable revision timeline, newest first, with origin and checksum metadata.",
+        .schema =
+        \\{"type":"object","properties":{"id":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1,"maximum":100,"default":20},"offset":{"type":"integer","minimum":0,"default":0}},"required":["id"],"additionalProperties":false}
+        ,
+        .write = false,
+    },
+    .{
+        .name = "get_revision",
+        .title = "Get revision",
+        .description = "Read one historical revision's exact Markdown, metadata, checksum and attachment manifest.",
+        .schema =
+        \\{"type":"object","properties":{"id":{"type":"integer","minimum":1},"revision":{"type":"integer","minimum":1}},"required":["id","revision"],"additionalProperties":false}
+        ,
+        .write = false,
+    },
+    .{
+        .name = "compare_revisions",
+        .title = "Compare revisions",
+        .description = "Return a bounded unified line diff between two revisions without changing the note.",
+        .schema =
+        \\{"type":"object","properties":{"id":{"type":"integer","minimum":1},"from":{"type":"integer","minimum":1},"to":{"type":"integer","minimum":1}},"required":["id","from","to"],"additionalProperties":false}
+        ,
+        .write = false,
+    },
+    .{
         .name = "get_theme",
         .title = "Get theme",
         .description = "Return the current theme id, display name, and mode.",
@@ -190,6 +218,16 @@ const tools = [_]Tool{
         .description = "Restore a note from Trash. Requires the trash version.",
         .schema =
         \\{"type":"object","properties":{"id":{"type":"integer","minimum":1},"version":{"type":"integer","minimum":1}},"required":["id","version"],"additionalProperties":false}
+        ,
+        .write = true,
+        .idempotent = false,
+    },
+    .{
+        .name = "restore_revision",
+        .title = "Restore revision",
+        .description = "Restore an old revision as a new head revision. Requires the current note version; history is never rewritten.",
+        .schema =
+        \\{"type":"object","properties":{"id":{"type":"integer","minimum":1},"version":{"type":"integer","minimum":1},"revision":{"type":"integer","minimum":1}},"required":["id","version","revision"],"additionalProperties":false}
         ,
         .write = true,
         .idempotent = false,
@@ -444,6 +482,9 @@ fn dispatchTool(app: *App, arena: Allocator, name: []const u8, args: Object) !To
     if (std.mem.eql(u8, name, "list_attachments")) return toolListAttachments(app, arena, args);
     if (std.mem.eql(u8, name, "get_attachment")) return toolGetAttachment(app, arena, args);
     if (std.mem.eql(u8, name, "get_library_stats")) return toolStats(app, arena, args);
+    if (std.mem.eql(u8, name, "list_revisions")) return toolListRevisions(app, arena, args);
+    if (std.mem.eql(u8, name, "get_revision")) return toolGetRevision(app, arena, args);
+    if (std.mem.eql(u8, name, "compare_revisions")) return toolCompareRevisions(app, arena, args);
     if (std.mem.eql(u8, name, "get_theme")) return toolGetTheme(app, arena, args);
     if (std.mem.eql(u8, name, "create_note")) return toolCreateNote(app, arena, args);
     if (std.mem.eql(u8, name, "update_note")) return toolUpdateNote(app, arena, args);
@@ -451,6 +492,7 @@ fn dispatchTool(app: *App, arena: Allocator, name: []const u8, args: Object) !To
     if (std.mem.eql(u8, name, "set_pinned")) return toolSetPinned(app, arena, args);
     if (std.mem.eql(u8, name, "delete_note")) return toolDeleteNote(app, arena, args);
     if (std.mem.eql(u8, name, "restore_note")) return toolRestoreNote(app, arena, args);
+    if (std.mem.eql(u8, name, "restore_revision")) return toolRestoreRevision(app, arena, args);
     if (std.mem.eql(u8, name, "attach_file")) return toolAttachFile(app, arena, args);
     if (std.mem.eql(u8, name, "delete_attachment")) return toolDeleteAttachment(app, arena, args);
     if (std.mem.eql(u8, name, "set_theme")) return toolSetTheme(app, arena, args);
@@ -673,13 +715,132 @@ fn toolGetTheme(app: *App, arena: Allocator, args: Object) !ToolResult {
     return .{ .payload = aw.written() };
 }
 
+fn toolListRevisions(app: *App, arena: Allocator, args: Object) !ToolResult {
+    const id = try reqInt(args, "id");
+    if (id < 1) return error.InvalidArguments;
+    const limit = try optInt(args, "limit", default_limit);
+    const offset = try optInt(args, "offset", 0);
+    if (limit < 1 or limit > max_limit or offset < 0) return error.InvalidArguments;
+    _ = try app.database.getNote(arena, id, true) orelse {
+        return .{ .payload = try errorPayload(arena, "not_found", "No note with that id."), .is_error = true };
+    };
+    const rows = try app.database.listRevisions(arena, id, @intCast(offset), @intCast(limit));
+    const total = try app.database.countRevisions(id);
+    var aw = Writer.Allocating.init(arena);
+    var jw = std.json.Stringify{ .writer = &aw.writer };
+    try jw.beginObject();
+    try jw.objectField("note_id");
+    try jw.write(id);
+    try jw.objectField("total");
+    try jw.write(total);
+    try jw.objectField("revisions");
+    try jw.beginArray();
+    for (rows) |row| {
+        try jw.beginObject();
+        try jw.objectField("revision");
+        try jw.write(row.revision_no);
+        try jw.objectField("note_version");
+        try jw.write(row.note_version);
+        try jw.objectField("created_at");
+        try jw.write(row.created_at);
+        try jw.objectField("origin");
+        try jw.write(@tagName(row.origin));
+        try jw.objectField("action");
+        try jw.write(@tagName(row.action));
+        try jw.objectField("summary");
+        try jw.write(row.summary);
+        try jw.objectField("title");
+        try jw.write(row.title);
+        try jw.objectField("checksum");
+        try jw.write(row.checksum);
+        try jw.endObject();
+    }
+    try jw.endArray();
+    try jw.endObject();
+    return .{ .payload = aw.written() };
+}
+
+fn toolGetRevision(app: *App, arena: Allocator, args: Object) !ToolResult {
+    const id = try reqInt(args, "id");
+    const revision_no = try reqInt(args, "revision");
+    if (id < 1 or revision_no < 1) return error.InvalidArguments;
+    const revision = (try app.database.getRevision(arena, id, revision_no)) orelse {
+        return .{ .payload = try errorPayload(arena, "not_found", "No revision with that number for this note."), .is_error = true };
+    };
+    const assets = try app.database.revisionAssets(arena, id, revision_no);
+    var aw = Writer.Allocating.init(arena);
+    var jw = std.json.Stringify{ .writer = &aw.writer };
+    try jw.beginObject();
+    try jw.objectField("revision");
+    try writeRevisionJson(&jw, revision);
+    try jw.objectField("assets");
+    try jw.beginArray();
+    for (assets) |asset| {
+        try jw.beginObject();
+        try jw.objectField("attachment_id");
+        try jw.write(asset.attachment_id);
+        try jw.objectField("filename");
+        try jw.write(asset.filename);
+        try jw.objectField("mime");
+        try jw.write(asset.mime);
+        try jw.objectField("size");
+        try jw.write(asset.size);
+        try jw.objectField("sha256");
+        try jw.write(asset.sha256);
+        try jw.endObject();
+    }
+    try jw.endArray();
+    try jw.endObject();
+    return .{ .payload = aw.written() };
+}
+
+fn toolCompareRevisions(app: *App, arena: Allocator, args: Object) !ToolResult {
+    const id = try reqInt(args, "id");
+    const from_no = try reqInt(args, "from");
+    const to_no = try reqInt(args, "to");
+    if (id < 1 or from_no < 1 or to_no < 1) return error.InvalidArguments;
+    const from_rev = (try app.database.getRevision(arena, id, from_no)) orelse {
+        return .{ .payload = try errorPayload(arena, "not_found", "The 'from' revision does not exist."), .is_error = true };
+    };
+    const to_rev = (try app.database.getRevision(arena, id, to_no)) orelse {
+        return .{ .payload = try errorPayload(arena, "not_found", "The 'to' revision does not exist."), .is_error = true };
+    };
+    const all_rows = try diff.lineDiff(arena, from_rev.body, to_rev.body);
+    const max_rendered_diff_lines: usize = 5000;
+    const rows = all_rows[0..@min(all_rows.len, max_rendered_diff_lines)];
+    var aw = Writer.Allocating.init(arena);
+    var jw = std.json.Stringify{ .writer = &aw.writer };
+    try jw.beginObject();
+    try jw.objectField("note_id");
+    try jw.write(id);
+    try jw.objectField("from");
+    try jw.write(from_no);
+    try jw.objectField("to");
+    try jw.write(to_no);
+    try jw.objectField("truncated");
+    try jw.write(all_rows.len > max_rendered_diff_lines);
+    try jw.objectField("lines");
+    try jw.beginArray();
+    for (rows) |row| {
+        try jw.beginObject();
+        try jw.objectField("kind");
+        try jw.write(@tagName(row.kind));
+        try jw.objectField("text");
+        try jw.write(row.text);
+        try jw.endObject();
+    }
+    try jw.endArray();
+    try jw.endObject();
+    return .{ .payload = aw.written() };
+}
+
 // ---- write tools ----
 
 fn toolCreateNote(app: *App, arena: Allocator, args: Object) !ToolResult {
     const title = try reqString(args, "title");
     const body = try reqString(args, "body");
     validateDraft(title, body) catch return .{ .payload = try errorPayload(arena, "invalid_note", "Title or body is too long or not valid UTF-8."), .is_error = true };
-    const id = try app.database.createNote(arena, title, body, nowSeconds(app.io));
+    const id = try app.database.createNoteFrom(arena, title, body, nowSeconds(app.io), .mcp);
     return noteResult(app, arena, id, false);
 }
 
@@ -689,7 +850,7 @@ fn toolUpdateNote(app: *App, arena: Allocator, args: Object) !ToolResult {
     const title = try reqString(args, "title");
     const body = try reqString(args, "body");
     validateDraft(title, body) catch return .{ .payload = try errorPayload(arena, "invalid_note", "Title or body is too long or not valid UTF-8."), .is_error = true };
-    const result = try app.database.updateNote(id, version, title, body, nowSeconds(app.io));
+    const result = try app.database.updateNoteFrom(id, version, title, body, nowSeconds(app.io), .mcp);
     return switch (result) {
         .ok => noteResult(app, arena, id, false),
         .conflict => conflictResult(app, arena, id, "The note changed since that version was read."),
@@ -712,7 +873,7 @@ fn toolAppendNote(app: *App, arena: Allocator, args: Object) !ToolResult {
     try combined.appendSlice(arena, text);
     const body = try combined.toOwnedSlice(arena);
     util.validateBody(body) catch return .{ .payload = try errorPayload(arena, "invalid_note", "The appended note would exceed 256 KiB."), .is_error = true };
-    const result = try app.database.updateNote(id, version, note.title, body, nowSeconds(app.io));
+    const result = try app.database.updateNoteFrom(id, version, note.title, body, nowSeconds(app.io), .mcp);
     return switch (result) {
         .ok => noteResult(app, arena, id, false),
         .conflict => conflictResult(app, arena, id, "The note changed since that version was read."),
@@ -725,7 +886,7 @@ fn toolSetPinned(app: *App, arena: Allocator, args: Object) !ToolResult {
     const id = try reqInt(args, "id");
     const version = try reqInt(args, "version");
     const pinned = try reqBool(args, "pinned");
-    const result = try app.database.setPinned(id, version, pinned, nowSeconds(app.io));
+    const result = try app.database.setPinnedFrom(id, version, pinned, nowSeconds(app.io), .mcp);
     return switch (result) {
         .ok => noteResult(app, arena, id, false),
         .conflict => conflictResult(app, arena, id, "The note changed since that version was read."),
@@ -737,7 +898,7 @@ fn toolSetPinned(app: *App, arena: Allocator, args: Object) !ToolResult {
 fn toolDeleteNote(app: *App, arena: Allocator, args: Object) !ToolResult {
     const id = try reqInt(args, "id");
     const version = try reqInt(args, "version");
-    const result = try app.database.softDelete(id, version, nowSeconds(app.io));
+    const result = try app.database.softDeleteFrom(id, version, nowSeconds(app.io), .mcp);
     return switch (result) {
         .ok => noteResult(app, arena, id, true),
         .conflict => conflictResult(app, arena, id, "The note changed since that version was read."),
@@ -749,10 +910,30 @@ fn toolDeleteNote(app: *App, arena: Allocator, args: Object) !ToolResult {
 fn toolRestoreNote(app: *App, arena: Allocator, args: Object) !ToolResult {
     const id = try reqInt(args, "id");
     const version = try reqInt(args, "version");
-    const result = try app.database.restore(id, version, nowSeconds(app.io));
+    const result = try app.database.restoreFrom(id, version, nowSeconds(app.io), .mcp);
     return switch (result) {
         .ok => noteResult(app, arena, id, false),
         .conflict, .deleted => conflictResult(app, arena, id, "The note changed since that version was read."),
+        .not_found => .{ .payload = try errorPayload(arena, "not_found", "No note with that id."), .is_error = true },
+    };
+}
+
+fn toolRestoreRevision(app: *App, arena: Allocator, args: Object) !ToolResult {
+    const id = try reqInt(args, "id");
+    const version = try reqInt(args, "version");
+    const revision_no = try reqInt(args, "revision");
+    if (id < 1 or version < 1 or revision_no < 1) return error.InvalidArguments;
+    const result = app.database.restoreRevision(arena, id, version, revision_no, nowSeconds(app.io), .mcp) catch |err| switch (err) {
+        error.RevisionNotFound => return .{
+            .payload = try errorPayload(arena, "not_found", "No revision with that number for this note."),
+            .is_error = true,
+        },
+        else => return err,
+    };
+    return switch (result) {
+        .ok => noteResult(app, arena, id, false),
+        .conflict => conflictResult(app, arena, id, "The note changed since that version was read."),
+        .deleted => conflictResult(app, arena, id, "The note is in Trash."),
         .not_found => .{ .payload = try errorPayload(arena, "not_found", "No note with that id."), .is_error = true },
     };
 }
@@ -791,12 +972,12 @@ fn toolAttachFile(app: *App, arena: Allocator, args: Object) !ToolResult {
     }, nowSeconds(app.io));
     const new_body = try media.appendFileLink(arena, note.body, attachment_id, filename, mime);
     if (new_body.len > util.max_body_bytes) {
-        _ = app.database.deleteAttachment(attachment_id, note_id) catch {};
+        _ = app.database.discardUnlinkedAttachment(attachment_id, note_id) catch {};
         return .{ .payload = try errorPayload(arena, "note_full", "The note is at its 256 KiB limit."), .is_error = true };
     }
-    const updated = try app.database.updateNote(note_id, version, note.title, new_body, nowSeconds(app.io));
+    const updated = try app.database.updateNoteFrom(note_id, version, note.title, new_body, nowSeconds(app.io), .mcp);
     if (updated != .ok) {
-        _ = app.database.deleteAttachment(attachment_id, note_id) catch {};
+        _ = app.database.discardUnlinkedAttachment(attachment_id, note_id) catch {};
         if (updated == .conflict) return conflictResult(app, arena, note_id, "The note changed since that version was read.");
         return .{ .payload = try errorPayload(arena, "write_failed", "The attachment could not be linked."), .is_error = true };
     }
@@ -1047,6 +1228,33 @@ fn writeAttachmentMeta(jw: *std.json.Stringify, file: db.Attachment) !void {
     try jw.write(file.sha256);
     try jw.objectField("created_at");
     try jw.write(file.created_at);
+    try jw.endObject();
+}
+
+fn writeRevisionJson(jw: *std.json.Stringify, revision: db.Revision) !void {
+    try jw.beginObject();
+    try jw.objectField("revision");
+    try jw.write(revision.revision_no);
+    try jw.objectField("note_version");
+    try jw.write(revision.note_version);
+    try jw.objectField("title");
+    try jw.write(revision.title);
+    try jw.objectField("body");
+    try jw.write(revision.body);
+    try jw.objectField("pinned");
+    try jw.write(revision.is_pinned);
+    try jw.objectField("deleted_at");
+    if (revision.deleted_at) |stamp| try jw.write(stamp) else try jw.write(null);
+    try jw.objectField("created_at");
+    try jw.write(revision.created_at);
+    try jw.objectField("origin");
+    try jw.write(@tagName(revision.origin));
+    try jw.objectField("action");
+    try jw.write(@tagName(revision.action));
+    try jw.objectField("summary");
+    try jw.write(revision.summary);
+    try jw.objectField("checksum");
+    try jw.write(revision.checksum);
     try jw.endObject();
 }
 

@@ -62,6 +62,7 @@ pub const Attachment = struct {
     size: i64,
     sha256: []const u8,
     created_at: i64,
+    deleted_at: ?i64 = null,
 };
 
 pub const AttachmentData = struct {
@@ -70,6 +71,56 @@ pub const AttachmentData = struct {
 };
 
 pub const WriteResult = enum { ok, not_found, deleted, conflict };
+
+/// Who performed a mutation. Persisted with every revision so history has
+/// provenance without storing note content in operational logs.
+pub const Origin = enum { web, mcp, import, admin, system };
+
+pub const RevisionAction = enum {
+    baseline,
+    create,
+    update,
+    pin,
+    unpin,
+    delete,
+    restore,
+    restore_revision,
+};
+
+pub const Revision = struct {
+    id: i64,
+    note_id: i64,
+    revision_no: i64,
+    note_version: i64,
+    title: []const u8,
+    body: []const u8,
+    is_pinned: bool,
+    deleted_at: ?i64,
+    created_at: i64,
+    origin: Origin,
+    action: RevisionAction,
+    summary: []const u8,
+    checksum: []const u8,
+};
+
+pub const RevisionRow = struct {
+    revision_no: i64,
+    note_version: i64,
+    title: []const u8,
+    created_at: i64,
+    origin: Origin,
+    action: RevisionAction,
+    summary: []const u8,
+    checksum: []const u8,
+};
+
+pub const RevisionAsset = struct {
+    attachment_id: i64,
+    filename: []const u8,
+    mime: []const u8,
+    size: i64,
+    sha256: []const u8,
+};
 
 /// Creates a consistent copy using SQLite's online backup API. Safe while a
 /// server process is writing; a plain file copy of a WAL database is not.
@@ -168,7 +219,7 @@ pub const Db = struct {
             \\SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
         );
         const current = self.schemaVersion() catch return DbError.MigrationFailed;
-        if (current > 3) return DbError.VersionMismatch;
+        if (current > 4) return DbError.VersionMismatch;
         if (current == 0) {
             try self.execRaw("BEGIN IMMEDIATE;");
             errdefer _ = self.execRaw("ROLLBACK;") catch {};
@@ -189,6 +240,34 @@ pub const Db = struct {
             try self.execRaw(assets.migration_0003);
             try self.execRaw("UPDATE schema_meta SET version = 3;");
             try self.execRaw("COMMIT;");
+        }
+        if (current <= 3) {
+            try self.execRaw("BEGIN IMMEDIATE;");
+            errdefer _ = self.execRaw("ROLLBACK;") catch {};
+            try self.execRaw(assets.migration_0004);
+            try self.seedBaselineRevisions();
+            try self.execRaw("UPDATE schema_meta SET version = 4;");
+            try self.execRaw("COMMIT;");
+        }
+    }
+
+    /// The v4 migration point. Existing notes get exactly one baseline revision
+    /// with their current bytes; no earlier history is invented. Runs inside the
+    /// migration transaction.
+    fn seedBaselineRevisions(self: *Db) DbError!void {
+        var stmt = self.prepare(
+            "SELECT id FROM notes WHERE NOT EXISTS (SELECT 1 FROM note_revisions r WHERE r.note_id = notes.id)",
+        ) catch return DbError.MigrationFailed;
+        defer stmt.deinit();
+        var ids: std.ArrayList(i64) = .empty;
+        defer ids.deinit(self.allocator);
+        while (true) {
+            const rc = stmt.step() catch return DbError.MigrationFailed;
+            if (rc != c.SQLITE_ROW) break;
+            ids.append(self.allocator, c.sqlite3_column_int64(stmt.handle, 0)) catch return DbError.MigrationFailed;
+        }
+        for (ids.items) |id| {
+            self.insertRevisionLocked(id, null, .system, .baseline, "Baseline revision created by the v2 migration") catch return DbError.MigrationFailed;
         }
     }
 
@@ -233,6 +312,10 @@ pub const Db = struct {
         fn bindBlob(self: *Stmt, index: c_int, data: []const u8) !void {
             const rc = c.sqlite3_bind_blob(self.handle, index, data.ptr, @intCast(data.len), null);
             if (rc != c.SQLITE_OK) return error.Sqlite;
+        }
+
+        fn bindNull(self: *Stmt, index: c_int) !void {
+            if (c.sqlite3_bind_null(self.handle, index) != c.SQLITE_OK) return error.Sqlite;
         }
     };
 
@@ -423,7 +506,7 @@ pub const Db = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         var stmt = try self.prepare(
-            \\SELECT id, note_id, filename, mime, size, sha256, created_at, data
+            \\SELECT id, note_id, filename, mime, size, sha256, created_at, data, deleted_at
             \\FROM attachments WHERE id = ?
         );
         defer stmt.deinit();
@@ -438,6 +521,10 @@ pub const Db = struct {
                 .size = c.sqlite3_column_int64(stmt.handle, 4),
                 .sha256 = try self.columnText(&stmt, 5, allocator),
                 .created_at = c.sqlite3_column_int64(stmt.handle, 6),
+                .deleted_at = if (c.sqlite3_column_type(stmt.handle, 8) == c.SQLITE_NULL)
+                    null
+                else
+                    c.sqlite3_column_int64(stmt.handle, 8),
             },
             .data = try self.columnBlob(&stmt, 7, allocator),
         };
@@ -448,11 +535,12 @@ pub const Db = struct {
         defer self.mutex.unlock(self.io);
         var stmt = try self.prepare(
             \\SELECT id, note_id, filename, mime, size, sha256, created_at
-            \\FROM attachments WHERE note_id = ? ORDER BY id ASC
+            \\FROM attachments WHERE note_id = ? AND deleted_at IS NULL ORDER BY id ASC
         );
         defer stmt.deinit();
         try stmt.bindInt(1, note_id);
         var rows: std.ArrayList(Attachment) = .empty;
+        errdefer rows.deinit(allocator);
         while (try stmt.step() == c.SQLITE_ROW) {
             try rows.append(allocator, .{
                 .id = c.sqlite3_column_int64(stmt.handle, 0),
@@ -470,7 +558,10 @@ pub const Db = struct {
     pub fn deleteAttachment(self: *Db, id: i64, note_id: i64) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        var stmt = try self.prepare("DELETE FROM attachments WHERE id = ? AND note_id = ?");
+        // Soft delete: history must keep referencing the exact bytes.
+        var stmt = try self.prepare(
+            "UPDATE attachments SET deleted_at = unixepoch() WHERE id = ? AND note_id = ? AND deleted_at IS NULL",
+        );
         defer stmt.deinit();
         try stmt.bindInt(1, id);
         try stmt.bindInt(2, note_id);
@@ -478,11 +569,38 @@ pub const Db = struct {
         return c.sqlite3_changes(self.handle) == 1;
     }
 
+    /// Rollback helper for a failed upload/link sequence. Unlike deleteAttachment
+    /// this removes bytes that were never acknowledged as part of a revision.
+    pub fn discardUnlinkedAttachment(self: *Db, id: i64, note_id: i64) !void {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare(
+            "DELETE FROM attachments WHERE id = ? AND note_id = ? AND deleted_at IS NULL",
+        );
+        defer stmt.deinit();
+        try stmt.bindInt(1, id);
+        try stmt.bindInt(2, note_id);
+        if (try stmt.step() != c.SQLITE_DONE) return error.Sqlite;
+    }
+
     // ---- notes ----
 
     pub fn createNote(self: *Db, allocator: Allocator, title: []const u8, body: []const u8, now: i64) !i64 {
+        return self.createNoteFrom(allocator, title, body, now, .system);
+    }
+
+    pub fn createNoteFrom(
+        self: *Db,
+        allocator: Allocator,
+        title: []const u8,
+        body: []const u8,
+        now: i64,
+        origin: Origin,
+    ) !i64 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+        try self.execRaw("BEGIN IMMEDIATE;");
+        errdefer self.rollbackWrite();
         var stmt = try self.prepare(
             \\INSERT INTO notes(title, body, created_at, updated_at, version, is_pinned, deleted_at)
             \\VALUES(?, ?, ?, ?, 1, 0, NULL)
@@ -494,7 +612,10 @@ pub const Db = struct {
         try stmt.bindInt(4, now);
         if (try stmt.step() != c.SQLITE_DONE) return error.Sqlite;
         _ = allocator;
-        return c.sqlite3_last_insert_rowid(self.handle);
+        const id = c.sqlite3_last_insert_rowid(self.handle);
+        try self.insertRevisionLocked(id, now, origin, .create, "Created note");
+        try self.execRaw("COMMIT;");
+        return id;
     }
 
     pub fn getNote(self: *Db, allocator: Allocator, id: i64, include_deleted: bool) !?Note {
@@ -523,6 +644,105 @@ pub const Db = struct {
         };
     }
 
+    const NoteState = struct {
+        version: i64,
+        title: []const u8,
+        body: []const u8,
+        is_pinned: bool,
+        deleted_at: ?i64,
+        updated_at: i64,
+
+        fn deinit(self: NoteState, allocator: Allocator) void {
+            allocator.free(self.title);
+            allocator.free(self.body);
+        }
+    };
+
+    fn readNoteStateLocked(self: *Db, allocator: Allocator, id: i64) !?NoteState {
+        var stmt = try self.prepare(
+            "SELECT version, deleted_at, title, body, is_pinned, updated_at FROM notes WHERE id = ?",
+        );
+        defer stmt.deinit();
+        try stmt.bindInt(1, id);
+        if (try stmt.step() != c.SQLITE_ROW) return null;
+        const title = try self.columnText(&stmt, 2, allocator);
+        errdefer allocator.free(title);
+        const body = try self.columnText(&stmt, 3, allocator);
+        return .{
+            .version = c.sqlite3_column_int64(stmt.handle, 0),
+            .deleted_at = if (c.sqlite3_column_type(stmt.handle, 1) == c.SQLITE_NULL)
+                null
+            else
+                c.sqlite3_column_int64(stmt.handle, 1),
+            .title = title,
+            .body = body,
+            .is_pinned = c.sqlite3_column_int64(stmt.handle, 4) != 0,
+            .updated_at = c.sqlite3_column_int64(stmt.handle, 5),
+        };
+    }
+
+    fn rollbackWrite(self: *Db) void {
+        _ = self.execRaw("ROLLBACK;") catch {};
+    }
+
+    /// Appends the current note state as an immutable revision. Must be called
+    /// inside the same transaction as the note mutation it describes.
+    fn insertRevisionLocked(
+        self: *Db,
+        note_id: i64,
+        created_at: ?i64,
+        origin: Origin,
+        action: RevisionAction,
+        summary: []const u8,
+    ) !void {
+        const allocator = self.allocator;
+        const state = (try self.readNoteStateLocked(allocator, note_id)) orelse return error.Sqlite;
+        defer state.deinit(allocator);
+
+        const checksum = try noteChecksum(allocator, state.title, state.body);
+        defer allocator.free(checksum);
+
+        var number_stmt = try self.prepare(
+            "SELECT COALESCE(MAX(revision_no), 0) + 1 FROM note_revisions WHERE note_id = ?",
+        );
+        defer number_stmt.deinit();
+        try number_stmt.bindInt(1, note_id);
+        if (try number_stmt.step() != c.SQLITE_ROW) return error.Sqlite;
+        const revision_no = c.sqlite3_column_int64(number_stmt.handle, 0);
+
+        var insert = try self.prepare(
+            \\INSERT INTO note_revisions(
+            \\  note_id, revision_no, note_version, title, body, is_pinned,
+            \\  deleted_at, created_at, origin, action, summary, checksum
+            \\) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        );
+        defer insert.deinit();
+        try insert.bindInt(1, note_id);
+        try insert.bindInt(2, revision_no);
+        try insert.bindInt(3, state.version);
+        try insert.bindText(4, state.title);
+        try insert.bindText(5, state.body);
+        try insert.bindInt(6, if (state.is_pinned) 1 else 0);
+        if (state.deleted_at) |stamp| try insert.bindInt(7, stamp) else try insert.bindNull(7);
+        try insert.bindInt(8, created_at orelse state.updated_at);
+        try insert.bindText(9, @tagName(origin));
+        try insert.bindText(10, @tagName(action));
+        try insert.bindText(11, summary);
+        try insert.bindText(12, checksum);
+        if (try insert.step() != c.SQLITE_DONE) return error.Sqlite;
+        const revision_id = c.sqlite3_last_insert_rowid(self.handle);
+
+        var asset_insert = try self.prepare(
+            \\INSERT INTO revision_assets(revision_id, attachment_id, filename, mime, size, sha256)
+            \\SELECT ?, id, filename, mime, size, sha256 FROM attachments
+            \\WHERE note_id = ? AND deleted_at IS NULL
+        );
+        defer asset_insert.deinit();
+        try asset_insert.bindInt(1, revision_id);
+        try asset_insert.bindInt(2, note_id);
+        if (try asset_insert.step() != c.SQLITE_DONE) return error.Sqlite;
+    }
+
     pub fn updateNote(
         self: *Db,
         id: i64,
@@ -531,8 +751,42 @@ pub const Db = struct {
         body: []const u8,
         now: i64,
     ) !WriteResult {
+        return self.updateNoteFrom(id, expected_version, title, body, now, .web);
+    }
+
+    pub fn updateNoteFrom(
+        self: *Db,
+        id: i64,
+        expected_version: i64,
+        title: []const u8,
+        body: []const u8,
+        now: i64,
+        origin: Origin,
+    ) !WriteResult {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+        try self.execRaw("BEGIN IMMEDIATE;");
+        errdefer self.rollbackWrite();
+
+        const state = (try self.readNoteStateLocked(self.allocator, id)) orelse {
+            self.rollbackWrite();
+            return .not_found;
+        };
+        defer state.deinit(self.allocator);
+        if (state.deleted_at != null) {
+            self.rollbackWrite();
+            return .deleted;
+        }
+        if (state.version != expected_version) {
+            self.rollbackWrite();
+            return .conflict;
+        }
+        // No-op saves acknowledge without bumping the version or inventing history.
+        if (std.mem.eql(u8, state.title, title) and std.mem.eql(u8, state.body, body)) {
+            try self.execRaw("COMMIT;");
+            return .ok;
+        }
+
         var stmt = try self.prepare(
             \\UPDATE notes SET title = ?, body = ?, updated_at = ?, version = version + 1
             \\WHERE id = ? AND version = ? AND deleted_at IS NULL
@@ -543,40 +797,72 @@ pub const Db = struct {
         try stmt.bindInt(3, now);
         try stmt.bindInt(4, id);
         try stmt.bindInt(5, expected_version);
-        const rc = try stmt.step();
-        if (rc != c.SQLITE_DONE) return error.Sqlite;
-        if (c.sqlite3_changes(self.handle) == 1) return .ok;
-        return self.classifyWriteFailure(id);
-    }
+        if (try stmt.step() != c.SQLITE_DONE) return error.Sqlite;
+        if (c.sqlite3_changes(self.handle) != 1) return error.Sqlite;
 
-    fn classifyWriteFailure(self: *Db, id: i64) !WriteResult {
-        var stmt = try self.prepare("SELECT version, deleted_at FROM notes WHERE id = ?");
-        defer stmt.deinit();
-        try stmt.bindInt(1, id);
-        if (try stmt.step() != c.SQLITE_ROW) return .not_found;
-        if (c.sqlite3_column_type(stmt.handle, 1) != c.SQLITE_NULL) return .deleted;
-        return .conflict;
+        try self.insertRevisionLocked(id, now, origin, .update, "Edited title or body");
+        try self.execRaw("COMMIT;");
+        return .ok;
     }
 
     pub fn togglePin(self: *Db, id: i64, expected_version: i64, now: i64) !WriteResult {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        var stmt = try self.prepare(
-            \\UPDATE notes SET is_pinned = 1 - is_pinned, version = version + 1, updated_at = ?
-            \\WHERE id = ? AND version = ? AND deleted_at IS NULL
-        );
-        defer stmt.deinit();
-        try stmt.bindInt(1, now);
-        try stmt.bindInt(2, id);
-        try stmt.bindInt(3, expected_version);
-        if (try stmt.step() != c.SQLITE_DONE) return error.Sqlite;
-        if (c.sqlite3_changes(self.handle) == 1) return .ok;
-        return self.classifyWriteFailure(id);
+        try self.execRaw("BEGIN IMMEDIATE;");
+        errdefer self.rollbackWrite();
+        const state = (try self.readNoteStateLocked(self.allocator, id)) orelse {
+            self.rollbackWrite();
+            return .not_found;
+        };
+        const was_pinned = state.is_pinned;
+        state.deinit(self.allocator);
+        return self.setPinnedLocked(id, expected_version, !was_pinned, now, .web);
     }
 
     pub fn setPinned(self: *Db, id: i64, expected_version: i64, pinned: bool, now: i64) !WriteResult {
+        return self.setPinnedFrom(id, expected_version, pinned, now, .web);
+    }
+
+    pub fn setPinnedFrom(
+        self: *Db,
+        id: i64,
+        expected_version: i64,
+        pinned: bool,
+        now: i64,
+        origin: Origin,
+    ) !WriteResult {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+        try self.execRaw("BEGIN IMMEDIATE;");
+        errdefer self.rollbackWrite();
+        return self.setPinnedLocked(id, expected_version, pinned, now, origin);
+    }
+
+    fn setPinnedLocked(
+        self: *Db,
+        id: i64,
+        expected_version: i64,
+        pinned: bool,
+        now: i64,
+        origin: Origin,
+    ) !WriteResult {
+        const state = (try self.readNoteStateLocked(self.allocator, id)) orelse {
+            self.rollbackWrite();
+            return .not_found;
+        };
+        defer state.deinit(self.allocator);
+        if (state.deleted_at != null) {
+            self.rollbackWrite();
+            return .deleted;
+        }
+        if (state.version != expected_version) {
+            self.rollbackWrite();
+            return .conflict;
+        }
+        if (state.is_pinned == pinned) {
+            try self.execRaw("COMMIT;");
+            return .ok;
+        }
         var stmt = try self.prepare(
             \\UPDATE notes SET is_pinned = ?, version = version + 1, updated_at = ?
             \\WHERE id = ? AND version = ? AND deleted_at IS NULL
@@ -587,13 +873,40 @@ pub const Db = struct {
         try stmt.bindInt(3, id);
         try stmt.bindInt(4, expected_version);
         if (try stmt.step() != c.SQLITE_DONE) return error.Sqlite;
-        if (c.sqlite3_changes(self.handle) == 1) return .ok;
-        return self.classifyWriteFailure(id);
+        if (c.sqlite3_changes(self.handle) != 1) return error.Sqlite;
+        try self.insertRevisionLocked(
+            id,
+            now,
+            origin,
+            if (pinned) .pin else .unpin,
+            if (pinned) "Pinned note" else "Unpinned note",
+        );
+        try self.execRaw("COMMIT;");
+        return .ok;
     }
 
     pub fn softDelete(self: *Db, id: i64, expected_version: i64, now: i64) !WriteResult {
+        return self.softDeleteFrom(id, expected_version, now, .web);
+    }
+
+    pub fn softDeleteFrom(self: *Db, id: i64, expected_version: i64, now: i64, origin: Origin) !WriteResult {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+        try self.execRaw("BEGIN IMMEDIATE;");
+        errdefer self.rollbackWrite();
+        const state = (try self.readNoteStateLocked(self.allocator, id)) orelse {
+            self.rollbackWrite();
+            return .not_found;
+        };
+        defer state.deinit(self.allocator);
+        if (state.deleted_at != null) {
+            self.rollbackWrite();
+            return .deleted;
+        }
+        if (state.version != expected_version) {
+            self.rollbackWrite();
+            return .conflict;
+        }
         var stmt = try self.prepare(
             \\UPDATE notes SET deleted_at = ?, version = version + 1, updated_at = ?
             \\WHERE id = ? AND version = ? AND deleted_at IS NULL
@@ -604,13 +917,34 @@ pub const Db = struct {
         try stmt.bindInt(3, id);
         try stmt.bindInt(4, expected_version);
         if (try stmt.step() != c.SQLITE_DONE) return error.Sqlite;
-        if (c.sqlite3_changes(self.handle) == 1) return .ok;
-        return self.classifyWriteFailure(id);
+        if (c.sqlite3_changes(self.handle) != 1) return error.Sqlite;
+        try self.insertRevisionLocked(id, now, origin, .delete, "Moved to Trash");
+        try self.execRaw("COMMIT;");
+        return .ok;
     }
 
     pub fn restore(self: *Db, id: i64, expected_version: i64, now: i64) !WriteResult {
+        return self.restoreFrom(id, expected_version, now, .web);
+    }
+
+    pub fn restoreFrom(self: *Db, id: i64, expected_version: i64, now: i64, origin: Origin) !WriteResult {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
+        try self.execRaw("BEGIN IMMEDIATE;");
+        errdefer self.rollbackWrite();
+        const state = (try self.readNoteStateLocked(self.allocator, id)) orelse {
+            self.rollbackWrite();
+            return .not_found;
+        };
+        defer state.deinit(self.allocator);
+        if (state.deleted_at == null) {
+            self.rollbackWrite();
+            return .conflict;
+        }
+        if (state.version != expected_version) {
+            self.rollbackWrite();
+            return .conflict;
+        }
         var stmt = try self.prepare(
             \\UPDATE notes SET deleted_at = NULL, version = version + 1, updated_at = ?
             \\WHERE id = ? AND version = ? AND deleted_at IS NOT NULL
@@ -620,8 +954,224 @@ pub const Db = struct {
         try stmt.bindInt(2, id);
         try stmt.bindInt(3, expected_version);
         if (try stmt.step() != c.SQLITE_DONE) return error.Sqlite;
-        if (c.sqlite3_changes(self.handle) == 1) return .ok;
-        return self.classifyWriteFailure(id);
+        if (c.sqlite3_changes(self.handle) != 1) return error.Sqlite;
+        try self.insertRevisionLocked(id, now, origin, .restore, "Restored from Trash");
+        try self.execRaw("COMMIT;");
+        return .ok;
+    }
+
+    /// Restores an old revision as a new head revision. Historical rows are
+    /// never rewritten.
+    pub fn restoreRevision(
+        self: *Db,
+        allocator: Allocator,
+        id: i64,
+        expected_version: i64,
+        revision_no: i64,
+        now: i64,
+        origin: Origin,
+    ) !WriteResult {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        try self.execRaw("BEGIN IMMEDIATE;");
+        errdefer self.rollbackWrite();
+
+        const state = (try self.readNoteStateLocked(allocator, id)) orelse {
+            self.rollbackWrite();
+            return .not_found;
+        };
+        defer state.deinit(allocator);
+        if (state.deleted_at != null) {
+            self.rollbackWrite();
+            return .deleted;
+        }
+        if (state.version != expected_version) {
+            self.rollbackWrite();
+            return .conflict;
+        }
+        const revision = (try self.getRevisionLocked(allocator, id, revision_no)) orelse {
+            self.rollbackWrite();
+            return error.RevisionNotFound;
+        };
+        defer allocator.free(revision.title);
+        defer allocator.free(revision.body);
+        defer allocator.free(revision.summary);
+        defer allocator.free(revision.checksum);
+
+        var stmt = try self.prepare(
+            \\UPDATE notes SET title = ?, body = ?, updated_at = ?, version = version + 1
+            \\WHERE id = ? AND version = ? AND deleted_at IS NULL
+        );
+        defer stmt.deinit();
+        try stmt.bindText(1, revision.title);
+        try stmt.bindText(2, revision.body);
+        try stmt.bindInt(3, now);
+        try stmt.bindInt(4, id);
+        try stmt.bindInt(5, expected_version);
+        if (try stmt.step() != c.SQLITE_DONE) return error.Sqlite;
+        if (c.sqlite3_changes(self.handle) != 1) return error.Sqlite;
+
+        // Restoring a snapshot brings back the files that snapshot referenced.
+        // Bytes were never deleted, so this is a state change, not a copy.
+        var resurrect = try self.prepare(
+            \\UPDATE attachments SET deleted_at = NULL
+            \\WHERE note_id = ? AND id IN (
+            \\  SELECT attachment_id FROM revision_assets WHERE revision_id = ?
+            \\)
+        );
+        defer resurrect.deinit();
+        try resurrect.bindInt(1, id);
+        try resurrect.bindInt(2, revision.id);
+        if (try resurrect.step() != c.SQLITE_DONE) return error.Sqlite;
+
+        var summary_buf: [64]u8 = undefined;
+        const summary = try std.fmt.bufPrint(&summary_buf, "Restored revision {d}", .{revision_no});
+        try self.insertRevisionLocked(id, now, origin, .restore_revision, summary);
+        try self.execRaw("COMMIT;");
+        return .ok;
+    }
+
+    fn getRevisionLocked(self: *Db, allocator: Allocator, id: i64, revision_no: i64) !?Revision {
+        var stmt = try self.prepare(
+            \\SELECT id, note_id, revision_no, note_version, title, body, is_pinned,
+            \\       deleted_at, created_at, origin, action, summary, checksum
+            \\FROM note_revisions WHERE note_id = ? AND revision_no = ?
+        );
+        defer stmt.deinit();
+        try stmt.bindInt(1, id);
+        try stmt.bindInt(2, revision_no);
+        if (try stmt.step() != c.SQLITE_ROW) return null;
+        const origin_text = try self.columnText(&stmt, 9, allocator);
+        defer allocator.free(origin_text);
+        const action_text = try self.columnText(&stmt, 10, allocator);
+        defer allocator.free(action_text);
+        return .{
+            .id = c.sqlite3_column_int64(stmt.handle, 0),
+            .note_id = c.sqlite3_column_int64(stmt.handle, 1),
+            .revision_no = c.sqlite3_column_int64(stmt.handle, 2),
+            .note_version = c.sqlite3_column_int64(stmt.handle, 3),
+            .title = try self.columnText(&stmt, 4, allocator),
+            .body = try self.columnText(&stmt, 5, allocator),
+            .is_pinned = c.sqlite3_column_int64(stmt.handle, 6) != 0,
+            .deleted_at = if (c.sqlite3_column_type(stmt.handle, 7) == c.SQLITE_NULL)
+                null
+            else
+                c.sqlite3_column_int64(stmt.handle, 7),
+            .created_at = c.sqlite3_column_int64(stmt.handle, 8),
+            .origin = std.meta.stringToEnum(Origin, origin_text) orelse .system,
+            .action = std.meta.stringToEnum(RevisionAction, action_text) orelse .update,
+            .summary = try self.columnText(&stmt, 11, allocator),
+            .checksum = try self.columnText(&stmt, 12, allocator),
+        };
+    }
+
+    pub fn getRevision(self: *Db, allocator: Allocator, id: i64, revision_no: i64) !?Revision {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.getRevisionLocked(allocator, id, revision_no);
+    }
+
+    pub fn listRevisions(
+        self: *Db,
+        allocator: Allocator,
+        id: i64,
+        offset: usize,
+        limit: usize,
+    ) ![]RevisionRow {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare(
+            \\SELECT revision_no, note_version, title, created_at, origin, action, summary, checksum
+            \\FROM note_revisions WHERE note_id = ?
+            \\ORDER BY revision_no DESC LIMIT ? OFFSET ?
+        );
+        defer stmt.deinit();
+        try stmt.bindInt(1, id);
+        try stmt.bindInt(2, @intCast(limit));
+        try stmt.bindInt(3, @intCast(offset));
+        var rows: std.ArrayList(RevisionRow) = .empty;
+        errdefer rows.deinit(allocator);
+        while (try stmt.step() == c.SQLITE_ROW) {
+            const origin_text = try self.columnText(&stmt, 4, allocator);
+            defer allocator.free(origin_text);
+            const action_text = try self.columnText(&stmt, 5, allocator);
+            defer allocator.free(action_text);
+            try rows.append(allocator, .{
+                .revision_no = c.sqlite3_column_int64(stmt.handle, 0),
+                .note_version = c.sqlite3_column_int64(stmt.handle, 1),
+                .title = try self.columnText(&stmt, 2, allocator),
+                .created_at = c.sqlite3_column_int64(stmt.handle, 3),
+                .origin = std.meta.stringToEnum(Origin, origin_text) orelse .system,
+                .action = std.meta.stringToEnum(RevisionAction, action_text) orelse .update,
+                .summary = try self.columnText(&stmt, 6, allocator),
+                .checksum = try self.columnText(&stmt, 7, allocator),
+            });
+        }
+        return rows.toOwnedSlice(allocator);
+    }
+
+    pub fn countRevisions(self: *Db, id: i64) !i64 {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare("SELECT COUNT(*) FROM note_revisions WHERE note_id = ?");
+        defer stmt.deinit();
+        try stmt.bindInt(1, id);
+        if (try stmt.step() != c.SQLITE_ROW) return error.Sqlite;
+        return c.sqlite3_column_int64(stmt.handle, 0);
+    }
+
+    pub fn latestRevisionNo(self: *Db, id: i64) !i64 {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare("SELECT COALESCE(MAX(revision_no), 0) FROM note_revisions WHERE note_id = ?");
+        defer stmt.deinit();
+        try stmt.bindInt(1, id);
+        if (try stmt.step() != c.SQLITE_ROW) return error.Sqlite;
+        return c.sqlite3_column_int64(stmt.handle, 0);
+    }
+
+    pub fn revisionAssets(
+        self: *Db,
+        allocator: Allocator,
+        id: i64,
+        revision_no: i64,
+    ) ![]RevisionAsset {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare(
+            \\SELECT a.attachment_id, a.filename, a.mime, a.size, a.sha256
+            \\FROM revision_assets a JOIN note_revisions r ON r.id = a.revision_id
+            \\WHERE r.note_id = ? AND r.revision_no = ? ORDER BY a.attachment_id
+        );
+        defer stmt.deinit();
+        try stmt.bindInt(1, id);
+        try stmt.bindInt(2, revision_no);
+        var rows: std.ArrayList(RevisionAsset) = .empty;
+        errdefer rows.deinit(allocator);
+        while (try stmt.step() == c.SQLITE_ROW) {
+            try rows.append(allocator, .{
+                .attachment_id = c.sqlite3_column_int64(stmt.handle, 0),
+                .filename = try self.columnText(&stmt, 1, allocator),
+                .mime = try self.columnText(&stmt, 2, allocator),
+                .size = c.sqlite3_column_int64(stmt.handle, 3),
+                .sha256 = try self.columnText(&stmt, 4, allocator),
+            });
+        }
+        return rows.toOwnedSlice(allocator);
+    }
+
+    pub fn revisionHasAsset(self: *Db, note_id: i64, revision_no: i64, attachment_id: i64) !bool {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare(
+            \\SELECT 1 FROM revision_assets a JOIN note_revisions r ON r.id = a.revision_id
+            \\WHERE r.note_id = ? AND r.revision_no = ? AND a.attachment_id = ? LIMIT 1
+        );
+        defer stmt.deinit();
+        try stmt.bindInt(1, note_id);
+        try stmt.bindInt(2, revision_no);
+        try stmt.bindInt(3, attachment_id);
+        return (try stmt.step()) == c.SQLITE_ROW;
     }
 
     pub fn listNotes(
@@ -777,7 +1327,7 @@ pub const Db = struct {
     pub fn countAttachments(self: *Db) !i64 {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
-        var stmt = try self.prepare("SELECT COUNT(*) FROM attachments");
+        var stmt = try self.prepare("SELECT COUNT(*) FROM attachments WHERE deleted_at IS NULL");
         defer stmt.deinit();
         if (try stmt.step() != c.SQLITE_ROW) return error.Sqlite;
         return c.sqlite3_column_int64(stmt.handle, 0);
@@ -800,6 +1350,23 @@ pub const Db = struct {
         try self.execRaw("PRAGMA wal_checkpoint(TRUNCATE);");
     }
 };
+
+/// Content hash for revision integrity checks. Length prefixes keep title and
+/// body unambiguous without copying the note body.
+fn noteChecksum(allocator: Allocator, title: []const u8, body: []const u8) ![]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var length_buf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &length_buf, title.len, .little);
+    hasher.update(&length_buf);
+    hasher.update(title);
+    std.mem.writeInt(u64, &length_buf, body.len, .little);
+    hasher.update(&length_buf);
+    hasher.update(body);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    return allocator.dupe(u8, &hex);
+}
 
 fn makeFtsQuery(allocator: Allocator, q: []const u8) !?[]u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -876,6 +1443,120 @@ test "note lifecycle, search, version conflict and soft delete" {
     try testing.expect((try db.getNote(arena, id, false)) != null);
 
     try testing.expect(try db.integrityCheck());
+}
+
+test "revision engine: immutable snapshots, no-op, conflict and restore" {
+    const testing = std.testing;
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try std.fs.path.join(testing.allocator, &.{ ".zig-cache/tmp", &tmp.sub_path, "rev.db" });
+    defer testing.allocator.free(db_path);
+
+    const db = try Db.open(testing.allocator, io, db_path);
+    defer db.close(testing.allocator);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const id = try db.createNoteFrom(arena, "Original", "alpha\nbeta", 1000, .web);
+    try testing.expectEqual(@as(i64, 1), try db.countRevisions(id));
+    const first = (try db.getRevision(arena, id, 1)).?;
+    try testing.expectEqualStrings("alpha\nbeta", first.body);
+    try testing.expectEqual(Origin.web, first.origin);
+    try testing.expectEqual(RevisionAction.create, first.action);
+    try testing.expectEqual(@as(usize, 64), first.checksum.len);
+
+    // A no-op save does not bump the version or invent a revision.
+    try testing.expectEqual(WriteResult.ok, try db.updateNoteFrom(id, 1, "Original", "alpha\nbeta", 1001, .mcp));
+    try testing.expectEqual(@as(i64, 1), (try db.getNote(arena, id, false)).?.version);
+    try testing.expectEqual(@as(i64, 1), try db.countRevisions(id));
+
+    // Meaningful edit is append-only and records MCP provenance.
+    try testing.expectEqual(WriteResult.ok, try db.updateNoteFrom(id, 1, "Edited", "alpha\ngamma", 1002, .mcp));
+    try testing.expectEqual(@as(i64, 2), try db.countRevisions(id));
+    const second = (try db.getRevision(arena, id, 2)).?;
+    try testing.expectEqualStrings("alpha\ngamma", second.body);
+    try testing.expectEqual(Origin.mcp, second.origin);
+    try testing.expect(!std.mem.eql(u8, first.checksum, second.checksum));
+
+    // A stale write returns conflict and appends nothing.
+    try testing.expectEqual(WriteResult.conflict, try db.updateNoteFrom(id, 1, "Stale", "nope", 1003, .web));
+    try testing.expectEqual(@as(i64, 2), try db.countRevisions(id));
+
+    // Pin and delete are versioned events too.
+    try testing.expectEqual(WriteResult.ok, try db.setPinnedFrom(id, 2, true, 1004, .mcp));
+    try testing.expectEqual(@as(i64, 3), try db.countRevisions(id));
+    try testing.expectEqual(WriteResult.ok, try db.softDeleteFrom(id, 3, 1005, .mcp));
+    try testing.expectEqual(@as(i64, 4), try db.countRevisions(id));
+    try testing.expectEqual(WriteResult.ok, try db.restoreFrom(id, 4, 1006, .mcp));
+    try testing.expectEqual(@as(i64, 5), try db.countRevisions(id));
+
+    // Restore revision 1 as revision 6; revision 1 stays byte-identical.
+    try testing.expectEqual(WriteResult.ok, try db.restoreRevision(arena, id, 5, 1, 1007, .web));
+    try testing.expectEqual(@as(i64, 6), try db.countRevisions(id));
+    try testing.expectEqual(@as(i64, 6), (try db.getNote(arena, id, false)).?.version);
+    try testing.expectEqualStrings("alpha\nbeta", (try db.getNote(arena, id, false)).?.body);
+    try testing.expectEqualStrings("alpha\nbeta", (try db.getRevision(arena, id, 1)).?.body);
+    const restored = (try db.getRevision(arena, id, 6)).?;
+    try testing.expectEqual(RevisionAction.restore_revision, restored.action);
+
+    // Historical attachment manifests survive soft deletion of the file.
+    const attachment_id = try db.insertAttachment(.{
+        .note_id = id,
+        .filename = "diagram.png",
+        .mime = "image/png",
+        .sha256 = &"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".*,
+        .data = "png-bytes",
+    }, 1008);
+    try testing.expectEqual(WriteResult.ok, try db.updateNoteFrom(id, 6, "With file", "alpha\nbeta\n![x](/files/1/diagram.png)", 1009, .web));
+    const asset_rows = try db.revisionAssets(arena, id, 7);
+    try testing.expectEqual(@as(usize, 1), asset_rows.len);
+    try testing.expectEqual(attachment_id, asset_rows[0].attachment_id);
+    try testing.expect(try db.deleteAttachment(attachment_id, id));
+    try testing.expectEqual(@as(usize, 1), (try db.revisionAssets(arena, id, 7)).len);
+    try testing.expect((try db.attachment(arena, attachment_id)) != null);
+    try testing.expectEqual(@as(usize, 0), (try db.attachmentsForNote(arena, id)).len);
+
+    // Restoring the revision that referenced the file brings it back.
+    try testing.expectEqual(WriteResult.ok, try db.restoreRevision(arena, id, 7, 7, 1010, .web));
+    try testing.expectEqual(@as(usize, 1), (try db.attachmentsForNote(arena, id)).len);
+    try testing.expectEqual(@as(usize, 1), (try db.revisionAssets(arena, id, 8)).len);
+
+    try testing.expect(try db.integrityCheck());
+}
+
+test "v4 migration seeds one baseline revision without fabricating history" {
+    const testing = std.testing;
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try std.fs.path.join(testing.allocator, &.{ ".zig-cache/tmp", &tmp.sub_path, "upgrade.db" });
+    defer testing.allocator.free(db_path);
+
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var db = try Db.open(testing.allocator, io, db_path);
+    const id = try db.createNoteFrom(arena, "Pre-v4 note", "old body", 2000, .web);
+    // Simulate a database that predates the revision migration.
+    try db.execRaw("DROP INDEX attachments_live;");
+    try db.execRaw("ALTER TABLE attachments DROP COLUMN deleted_at;");
+    try db.execRaw("DROP TABLE revision_assets;");
+    try db.execRaw("DROP TABLE note_revisions;");
+    try db.execRaw("UPDATE schema_meta SET version = 3;");
+    db.close(testing.allocator);
+
+    db = try Db.open(testing.allocator, io, db_path);
+    defer db.close(testing.allocator);
+    try testing.expectEqual(@as(i64, 4), try db.schemaVersion());
+    try testing.expectEqual(@as(i64, 1), try db.countRevisions(id));
+    const baseline = (try db.getRevision(arena, id, 1)).?;
+    try testing.expectEqual(RevisionAction.baseline, baseline.action);
+    try testing.expectEqual(Origin.system, baseline.origin);
+    try testing.expectEqualStrings("old body", baseline.body);
+    try testing.expectEqual(@as(i64, 2000), baseline.created_at);
 }
 
 test "sessions and owner" {
