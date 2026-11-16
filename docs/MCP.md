@@ -67,6 +67,9 @@ Read tools are always present. Write tools appear only with `--allow-write`.
 | `list_attachments` | no | Attachment metadata for one note |
 | `get_attachment` | no | Base64 contents, MIME, size, SHA-256 |
 | `get_library_stats` | no | Note, trash, and attachment counts plus theme |
+| `list_revisions` | no | Immutable revision timeline, newest first |
+| `get_revision` | no | Exact historical Markdown, checksum and asset manifest |
+| `compare_revisions` | no | Escaped unified line diff between two revisions |
 | `get_theme` | no | Current theme id and the full list |
 | `create_note` | yes | New title and Markdown body |
 | `update_note` | yes | Replace title and body, requires `version` |
@@ -74,11 +77,16 @@ Read tools are always present. Write tools appear only with `--allow-write`.
 | `set_pinned` | yes | Pin or unpin, requires `version` |
 | `delete_note` | yes | Move to Trash, requires `version` |
 | `restore_note` | yes | Restore from Trash, requires the trash `version` |
+| `restore_revision` | yes | Copy an old revision to a new head, requires `version` |
 | `attach_file` | yes | Base64 upload up to 8 MiB, appends the Markdown link |
 | `delete_attachment` | yes | Remove an attachment record |
 | `set_theme` | yes | Set a validated theme id |
 
 Every write carries optimistic concurrency. A stale `version` returns `isError: true` with an `error` of `conflict` and the latest stored note, including its body, so the client can merge deliberately.
+
+Every web or MCP write appends an immutable revision with its origin, action and
+attachment manifest. `restore_revision` never rewrites history: it copies the
+old snapshot to a new revision and requires the current note `version`.
 
 ## Resources
 

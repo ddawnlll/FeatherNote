@@ -4,3 +4,4 @@ pub const css = @embedFile("web/style.css");
 pub const migration_0001 = @embedFile("migrations/0001_init.sql");
 pub const migration_0002 = @embedFile("migrations/0002_fts.sql");
 pub const migration_0003 = @embedFile("migrations/0003_themes_files.sql");
+pub const migration_0004 = @embedFile("migrations/0004_revisions.sql");

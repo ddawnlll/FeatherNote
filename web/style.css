@@ -468,6 +468,35 @@ button.link:hover, .link:hover { color: var(--fg); text-decoration: underline; t
 .diff-col h2 { margin-bottom: var(--space-4); }
 .diff-col textarea { min-height: 16rem; }
 
+/* ---------- revision history ---------- */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.history-table { width: 100%; border-collapse: collapse; margin-top: var(--space-6); font: 400 var(--text-sm)/1.5 var(--font-ui); }
+.history-table th, .history-table td { text-align: left; vertical-align: top; padding: var(--space-3) var(--space-2); border-bottom: 1px solid var(--line); }
+.history-table thead th { color: var(--muted); font-weight: 600; font-size: var(--text-xs); letter-spacing: 0.06em; text-transform: uppercase; }
+.history-table tbody th { font-weight: 600; white-space: nowrap; }
+.history-table a { color: var(--fg); }
+.snapshot-title { max-width: 22ch; overflow-wrap: anywhere; }
+.compare-form { display: flex; flex-wrap: wrap; align-items: end; gap: var(--space-3); margin: var(--space-6) 0; padding: var(--space-4); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.compare-form h2 { flex-basis: 100%; margin: 0; font: 600 var(--text-sm)/1.3 var(--font-ui); }
+.compare-form label { display: grid; gap: var(--space-1); color: var(--muted); font: 600 var(--text-xs)/1.3 var(--font-ui); }
+.compare-form input { width: 6rem; padding: var(--space-2); border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--fg); font: 400 var(--text-sm)/1.3 var(--font-ui); }
+.revision-meta { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-2) var(--space-4); margin: var(--space-6) 0; font: 400 var(--text-sm)/1.5 var(--font-ui); }
+.revision-meta dt { color: var(--muted); font-weight: 600; }
+.revision-meta dd { margin: 0; overflow-wrap: anywhere; }
+.revision-source { margin: var(--space-4) 0 var(--space-8); padding: var(--space-4); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); font: 400 var(--text-sm)/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 60vh; overflow: auto; }
+.revision-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-top: var(--space-6); }
+.diff-lines { list-style: none; margin: var(--space-6) 0; padding: var(--space-2) 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); font: 400 var(--text-sm)/1.6 var(--font-mono); overflow-x: auto; }
+.diff-line { display: grid; grid-template-columns: 1.5rem minmax(0, 1fr); gap: var(--space-2); padding: 0 var(--space-3); white-space: pre-wrap; overflow-wrap: anywhere; }
+.diff-line .diff-sign { color: var(--muted); user-select: none; text-align: center; }
+.diff-line.removed { background: var(--surface-2); }
+.diff-line.removed .diff-sign { color: var(--danger); }
+.diff-line.added { background: var(--surface-2); }
+.diff-line.added .diff-sign { color: var(--accent); }
+.diff-line code { font: inherit; }
+
 /* ---------- responsive ---------- */
 @media (min-width: 860px) {
   .sheet { grid-template-columns: 13rem minmax(0, 1fr); gap: var(--space-12); }

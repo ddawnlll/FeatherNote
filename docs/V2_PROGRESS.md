@@ -1,0 +1,60 @@
+# FeatherNote v2 progress ledger
+
+Updated 2026-11-16. Source of truth for workstream acceptance is still issues
+[#6–#14](https://github.com/ddawnlll/FeatherNote/issues) and the roadmap in
+[`V2_ROADMAP.md`](V2_ROADMAP.md). A merged PR is not acceptance evidence by
+itself; checks below name the test that proves the claim.
+
+## Integrated
+
+| Work | Evidence |
+|---|---|
+| Renderer PR #4 (F13, F14) | Merged to `master`; `zig build test`, 160 HTTP checks, 52 MCP checks; vendored MD4C checksums verified; XSS fixtures escaped. |
+| Zero-JS block editor PR #5 (F15–F18) | Merged after retargeting to `master`; preview/draft/conflict tests green. |
+| Roadmap PR #15 | Merged; 80 feature IDs and release gates are now on `master`. |
+| Revision engine foundation (F01, F02 read model, F04, F05, F07, F09, F11 source, F12 default) | `migrations/0004_revisions.sql`, one transactional writer for Web and MCP, migration baseline test, no-op/conflict tests. |
+| History timeline, compare and restore UI (F02, F03, F05) | `GET /notes/{id}/history`, `GET /notes/{id}/history/{rev}`, `GET /notes/{id}/compare`, `POST /notes/{id}/restore/{rev}`; escaped server-rendered diff; CSRF and version tests. |
+| Historical asset integrity, baseline (F08, part of #10) | Attachments soft-delete; `revision_assets` manifest; historical file access requires a revision that referenced it. |
+| MCP revisions (F66 partial, F69 writer) | `list_revisions`, `get_revision`, `compare_revisions`, `restore_revision`; read-only mode hides the write tool. |
+
+## Measured evidence (this iteration)
+
+- `zig build test`: pass (including revision lifecycle, no-op, conflict,
+  restore, attachment manifest, v3→v4 baseline migration, bounded diff).
+- `python3 tests/integration.py`: 160 passed, 0 failed.
+- `python3 tests/mcp_test.py`: 52 passed, 0 failed.
+- Zero client JavaScript: history and diff pages are server-rendered forms and
+  escaped HTML; integration checks assert no `<script>` in revision/compare
+  responses.
+
+## Open / next unblocked
+
+1. **F10 three-way merge.** The current 409 page preserves the draft and shows
+   the latest version, but does not compute base/latest/draft hunks. Next PR:
+   store the base revision number in the form and render an explicit merge
+   choice; never auto-merge.
+2. **F06 named checkpoints and F12 retention/purge.** Schema and history are
+   append-only by default; checkpoint labels and verified purge are not yet
+   implemented.
+3. **F11 historical download manifest.** The revision detail page lists assets
+   and exact source is available; a single downloadable `.md` plus manifest
+   export endpoint is still open.
+4. **Attachment removal is not itself a revision event yet.** The note bytes
+   are unchanged when a file is removed, so no note revision is appended; the
+   previous revision's manifest and bytes remain valid. A dedicated asset event
+   ledger belongs with the media workstream (#10, F46/F63).
+5. **F73/F76/F77 performance and migration gates.** Measure history/diff p95,
+   database growth for 100k revisions, and disk-full/WAL fault injection before
+   claiming the roadmap's proposed targets.
+6. **#7 remaining:** callouts, math, highlighting, diagrams, templates.
+7. **#8–#14 remaining:** folders/tags/links, search filters, media library,
+   mobile/print/a11y audit, verified backups/doctor/import/export, MCP change
+   cursor and collections, migration/fault gates.
+
+## Blockers
+
+No implementation blocker. The specified model route
+`opencode-go/deepseek-v4.1-flash` is present in `jcode model list` and the
+provider API key is configured; this session's own runtime model cannot be
+changed mid-session, so worker routing remains governed by the host's JCode
+configuration.

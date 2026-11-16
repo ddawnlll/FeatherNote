@@ -376,6 +376,66 @@ def main():
         status, _, edit = c.get(note_url + "/edit")
         check("xss fixture source preserved", b"onload=alert(1)" in edit and b"106;avascript" in edit)
 
+        # Issue #6: immutable revisions, history, diff and restore.
+        status, _, new_form = c.get("/notes/new")
+        status, headers, _ = c.form("/notes", {"title": "Revision lab", "body": "alpha\nbeta"},
+                                    csrf=csrf_of(new_form))
+        check("revision fixture created", status == 303, status)
+        rev_url = headers.get("location", "").split("?")[0]
+        status, _, rev_edit = c.get(rev_url + "/edit")
+        rev_version = version_of(rev_edit)
+        status, _, _ = c.form(rev_url, {"title": "Revision lab", "body": "alpha\nbeta"},
+                              csrf=csrf_of(rev_edit), version=rev_version)
+        check("no-op save is accepted", status == 303, status)
+        status, _, rev_edit = c.get(rev_url + "/edit")
+        check("no-op save keeps the version", version_of(rev_edit) == rev_version)
+        status, _, rev_history = c.get(rev_url + "/history")
+        check("history lists the creation revision",
+              status == 200 and b"History" in rev_history and b"r1" in rev_history
+              and b"Created" in rev_history and b"Web" in rev_history)
+        check("no-op save creates no revision",
+              rev_history.count(b"/history/") == 1, rev_history.count(b"/history/"))
+        status, _, rev_edit = c.get(rev_url + "/edit")
+        status, _, _ = c.form(rev_url,
+                              {"title": "Revision lab v2",
+                               "body": "alpha\n<script>alert(9)</script>\ngamma"},
+                              csrf=csrf_of(rev_edit), version=version_of(rev_edit))
+        check("revision edit succeeds", status == 303, status)
+        status, _, rev_history = c.get(rev_url + "/history")
+        check("history shows the edited revision",
+              b"r2" in rev_history and b"Edited" in rev_history and b"Revision lab v2" in rev_history)
+        status, _, old_rev = c.get(rev_url + "/history/1")
+        check("revision detail keeps exact old Markdown",
+              status == 200 and b"alpha\nbeta" in old_rev and b"Checksum" in old_rev)
+        check("revision detail has no scripts", b"<script" not in old_rev)
+        status, _, compared = c.get(rev_url + "/compare?from=1&to=2")
+        check("compare renders added and removed lines",
+              status == 200 and b"diff-line removed" in compared and b"diff-line added" in compared
+              and b"beta" in compared and b"gamma" in compared)
+        check("compare escapes historical XSS",
+              b"<script" not in compared and b"&lt;script&gt;" in compared)
+        status, _, _ = c.form(rev_url + "/restore/1", {}, csrf="0" * 64, version=2)
+        check("restore requires CSRF", status == 403, status)
+        status, _, _ = c.form(rev_url + "/restore/1", {}, csrf=csrf_of(rev_history), version=1)
+        check("stale restore is rejected", status == 409, status)
+        status, headers, _ = c.form(rev_url + "/restore/1", {}, csrf=csrf_of(rev_history), version=2)
+        check("restore redirects to history", status == 303 and headers.get("location") == rev_url + "/history",
+              f"{status} {headers}")
+        status, _, restored_page = c.get(rev_url)
+        check("restore copies the old Markdown", b"alpha" in restored_page and b"beta" in restored_page
+              and b"gamma" not in restored_page)
+        status, _, rev_history = c.get(rev_url + "/history")
+        check("restore is a new revision",
+              b"r3" in rev_history and b"Revision restored" in rev_history)
+        status, _, original = c.get(rev_url + "/history/1")
+        check("old revision is never rewritten", b"alpha\nbeta" in original)
+        status, _, _ = c.get(rev_url + "/history/999")
+        check("unknown revision is 404", status == 404, status)
+        status, _, _ = c.get(rev_url + "/restore/1")
+        check("restore rejects GET", status == 405, status)
+        status, _, _ = c.form(rev_url + "/history", {}, csrf=csrf_of(rev_history))
+        check("history rejects POST", status == 405, status)
+
         # Issue #3: server-driven preview and block editor (still zero JS).
         # NOTE: keep this fixture titled "First update"; the restart check below needs it.
         status, _, edit = c.get(note_url + "/edit")
@@ -499,6 +559,23 @@ def main():
             check("file delete redirects", status == 303, status)
             status, _, _ = c.get(file_path)
             check("deleted file is gone", status == 404, status)
+            status, _, file_history = c.get(note_url + "/history")
+            revision_match = re.search(rb'/history/(\d+)', file_history)
+            check("history exposes the uploading revision", revision_match is not None)
+            if revision_match:
+                revision_no = int(revision_match.group(1))
+                status, _, historical = c.get(file_path + f"?revision={revision_no}")
+                check("deleted file remains readable from its revision",
+                      status == 200 and historical.startswith(b"\x89PNG"), status)
+                status, _, _ = c.get(file_path + "?revision=999")
+                check("unreferenced deleted file stays hidden", status == 404, status)
+                status, _, revision_page = c.get(note_url + f"/history/{revision_no}")
+                status, _, _ = c.form(note_url + f"/restore/{revision_no}", {},
+                                      csrf=csrf_of(revision_page), version=version_of(revision_page))
+                check("restoring the revision succeeds", status == 303, status)
+                status, _, restored_file = c.get(file_path)
+                check("restoring a revision brings back its file",
+                      status == 200 and restored_file.startswith(b"\x89PNG"), status)
             bad_payload, bad_type = multipart_body({"csrf": "0" * 64}, "nope.png", png)
             status, _, _ = c.request("POST", note_url + "/files", bad_payload, {"Content-Type": bad_type})
             check("upload requires CSRF", status == 403, status)
