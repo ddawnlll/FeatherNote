@@ -1016,9 +1016,7 @@ fn handleUpdate(app: *App, request: *http.Server.Request, arena: Allocator, ctx:
         },
         .conflict => {
             const latest = (try app.database.getNote(arena, id, false)) orelse return notFound(arena, ctx);
-            var aw = std.Io.Writer.Allocating.init(arena);
-            try views.conflict(&aw.writer, ctx, latest, title, note_body);
-            return .{ .status = .conflict, .body = aw.written() };
+            return renderConflict(app, arena, ctx, id, version, latest, title, note_body);
         },
         .deleted => return htmlError(arena, ctx, .conflict, "Note is in Trash", "This note was moved to Trash. Restore it before saving."),
         .not_found => return notFound(arena, ctx),
@@ -1039,6 +1037,44 @@ fn renderEditorError(app: *App, arena: Allocator, ctx: views.Ctx, note: db.Note,
         .error_message = message,
     });
     return .{ .status = .bad_request, .body = aw.written() };
+}
+
+fn renderConflict(
+    app: *App,
+    arena: Allocator,
+    ctx: views.Ctx,
+    id: i64,
+    expected_version: i64,
+    latest: db.Note,
+    draft_title: []const u8,
+    draft_body: []const u8,
+) !Response {
+    const conflict_diff_limit: usize = 2000;
+    const base = try app.database.revisionAtVersion(arena, id, expected_version);
+    var latest_rows: []const diff.Row = &.{};
+    var draft_rows: []const diff.Row = &.{};
+    var latest_truncated = false;
+    var draft_truncated = false;
+    if (base) |snapshot| {
+        const all_latest = try diff.lineDiff(arena, snapshot.body, latest.body);
+        latest_rows = all_latest[0..@min(all_latest.len, conflict_diff_limit)];
+        latest_truncated = all_latest.len > conflict_diff_limit;
+        const all_draft = try diff.lineDiff(arena, snapshot.body, draft_body);
+        draft_rows = all_draft[0..@min(all_draft.len, conflict_diff_limit)];
+        draft_truncated = all_draft.len > conflict_diff_limit;
+    }
+    var aw = std.Io.Writer.Allocating.init(arena);
+    try views.conflict(&aw.writer, ctx, .{
+        .latest = latest,
+        .base = base,
+        .draft_title = draft_title,
+        .draft_body = draft_body,
+        .base_to_latest = latest_rows,
+        .base_to_draft = draft_rows,
+        .latest_truncated = latest_truncated,
+        .draft_truncated = draft_truncated,
+    });
+    return .{ .status = .conflict, .body = aw.written() };
 }
 
 fn renderEditorPreview(arena: Allocator, ctx: views.Ctx, args: views.EditorArgs, draft_body: []const u8) !Response {
@@ -1088,9 +1124,7 @@ fn handlePreview(app: *App, request: *http.Server.Request, arena: Allocator, ctx
     validateDraft(title, note_body) catch |err| return renderEditorError(app, arena, ctx, note, title, note_body, validationMessage(err));
     if (version != note.version) {
         const latest = (try app.database.getNote(arena, id, false)) orelse return notFound(arena, ctx);
-        var aw = std.Io.Writer.Allocating.init(arena);
-        try views.conflict(&aw.writer, ctx, latest, title, note_body);
-        return .{ .status = .conflict, .body = aw.written() };
+        return renderConflict(app, arena, ctx, id, version, latest, title, note_body);
     }
     // Preview only: render the draft, write nothing to the database.
     const sidebar_rows = try app.database.listNotes(arena, null, 0, 30);
@@ -1154,9 +1188,7 @@ fn submitNewBody(app: *App, arena: Allocator, ctx: views.Ctx, note: db.Note, ver
         .ok => return .{ .status = .see_other, .location = try blockRedirect(arena, note.id, redirect_index) },
         .conflict => {
             const latest = (try app.database.getNote(arena, note.id, false)) orelse return notFound(arena, ctx);
-            var aw = std.Io.Writer.Allocating.init(arena);
-            try views.conflict(&aw.writer, ctx, latest, note.title, new_body);
-            return .{ .status = .conflict, .body = aw.written() };
+            return renderConflict(app, arena, ctx, note.id, version, latest, note.title, new_body);
         },
         .deleted => return htmlError(arena, ctx, .conflict, "Note is in Trash", "This note was moved to Trash. Restore it before saving."),
         .not_found => return notFound(arena, ctx),
@@ -1224,9 +1256,7 @@ fn handleBlocksOp(app: *App, request: *http.Server.Request, arena: Allocator, ct
             .ok => return .{ .status = .see_other, .location = try blockRedirect(arena, note.id, null) },
             .conflict => {
                 const latest = (try app.database.getNote(arena, note.id, false)) orelse return notFound(arena, ctx);
-                var aw = std.Io.Writer.Allocating.init(arena);
-                try views.conflict(&aw.writer, ctx, latest, title, note.body);
-                return .{ .status = .conflict, .body = aw.written() };
+                return renderConflict(app, arena, ctx, note.id, version, latest, title, note.body);
             },
             .deleted => return htmlError(arena, ctx, .conflict, "Note is in Trash", "This note was moved to Trash. Restore it before saving."),
             .not_found => return notFound(arena, ctx),

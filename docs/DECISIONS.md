@@ -166,3 +166,19 @@ Restoring a revision also clears soft-deletion for the files listed in that
 revision, because their bytes were retained; the new head therefore has a
 working attachment set again. Files added after the restored revision stay
 live and are not removed.
+
+## D022 — Conflicts show base, latest and draft, never a silent merge
+
+The edit form still carries the note version it started from. On a 409,
+`revisionAtVersion(note_id, submitted_version)` finds the newest content
+snapshot at or before that version; pin/trash events can advance the version
+without changing text, so version equality alone is not enough. The conflict
+page shows the exact base snapshot, a line diff from base to latest, and a line
+diff from base to draft, with the draft still editable.
+
+There is no automatic merge, no last-write-wins, and no client JavaScript. The
+only overwrite is the explicit "Save draft over latest" button, which submits
+the latest version and is checked again by the normal writer. Conflict diffs
+are capped at 2,000 rendered lines and use escaped text. This satisfies the
+deliberate three-way review requirement without pretending to resolve
+overlapping edits automatically.

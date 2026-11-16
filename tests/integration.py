@@ -254,6 +254,10 @@ def main():
         check("stale save returns 409", status == 409, status)
         check("conflict preserves submitted draft", b"Stale draft" in body and b"my unsaved draft" in body)
         check("conflict shows latest stored version", b"First update" in body and b"version 2" in body)
+        check("conflict shows the form's base revision", b"Your base: revision 1" in body, body[:400])
+        check("conflict shows both three-way diffs",
+              b"Changes saved since your base" in body and b"Changes in your draft" in body)
+        check("conflict diff marks draft additions", b"diff-line added" in body and b"my unsaved draft" in body)
         status, _, body = c.get("/notes?q=" + urllib.parse.quote("version 2"))
         check("FTS index reflects saved update", status == 200 and b"First update" in body)
         status, _, body = c.get("/notes?q=" + urllib.parse.quote("my unsaved draft"))

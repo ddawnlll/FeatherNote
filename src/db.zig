@@ -1031,6 +1031,31 @@ pub const Db = struct {
         return .ok;
     }
 
+    fn revisionFromRowLocked(self: *Db, stmt: *Stmt, allocator: Allocator) !Revision {
+        const origin_text = try self.columnText(stmt, 9, allocator);
+        defer allocator.free(origin_text);
+        const action_text = try self.columnText(stmt, 10, allocator);
+        defer allocator.free(action_text);
+        return .{
+            .id = c.sqlite3_column_int64(stmt.handle, 0),
+            .note_id = c.sqlite3_column_int64(stmt.handle, 1),
+            .revision_no = c.sqlite3_column_int64(stmt.handle, 2),
+            .note_version = c.sqlite3_column_int64(stmt.handle, 3),
+            .title = try self.columnText(stmt, 4, allocator),
+            .body = try self.columnText(stmt, 5, allocator),
+            .is_pinned = c.sqlite3_column_int64(stmt.handle, 6) != 0,
+            .deleted_at = if (c.sqlite3_column_type(stmt.handle, 7) == c.SQLITE_NULL)
+                null
+            else
+                c.sqlite3_column_int64(stmt.handle, 7),
+            .created_at = c.sqlite3_column_int64(stmt.handle, 8),
+            .origin = std.meta.stringToEnum(Origin, origin_text) orelse .system,
+            .action = std.meta.stringToEnum(RevisionAction, action_text) orelse .update,
+            .summary = try self.columnText(stmt, 11, allocator),
+            .checksum = try self.columnText(stmt, 12, allocator),
+        };
+    }
+
     fn getRevisionLocked(self: *Db, allocator: Allocator, id: i64, revision_no: i64) !?Revision {
         var stmt = try self.prepare(
             \\SELECT id, note_id, revision_no, note_version, title, body, is_pinned,
@@ -1041,34 +1066,32 @@ pub const Db = struct {
         try stmt.bindInt(1, id);
         try stmt.bindInt(2, revision_no);
         if (try stmt.step() != c.SQLITE_ROW) return null;
-        const origin_text = try self.columnText(&stmt, 9, allocator);
-        defer allocator.free(origin_text);
-        const action_text = try self.columnText(&stmt, 10, allocator);
-        defer allocator.free(action_text);
-        return .{
-            .id = c.sqlite3_column_int64(stmt.handle, 0),
-            .note_id = c.sqlite3_column_int64(stmt.handle, 1),
-            .revision_no = c.sqlite3_column_int64(stmt.handle, 2),
-            .note_version = c.sqlite3_column_int64(stmt.handle, 3),
-            .title = try self.columnText(&stmt, 4, allocator),
-            .body = try self.columnText(&stmt, 5, allocator),
-            .is_pinned = c.sqlite3_column_int64(stmt.handle, 6) != 0,
-            .deleted_at = if (c.sqlite3_column_type(stmt.handle, 7) == c.SQLITE_NULL)
-                null
-            else
-                c.sqlite3_column_int64(stmt.handle, 7),
-            .created_at = c.sqlite3_column_int64(stmt.handle, 8),
-            .origin = std.meta.stringToEnum(Origin, origin_text) orelse .system,
-            .action = std.meta.stringToEnum(RevisionAction, action_text) orelse .update,
-            .summary = try self.columnText(&stmt, 11, allocator),
-            .checksum = try self.columnText(&stmt, 12, allocator),
-        };
+        return try self.revisionFromRowLocked(&stmt, allocator);
     }
 
     pub fn getRevision(self: *Db, allocator: Allocator, id: i64, revision_no: i64) !?Revision {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         return self.getRevisionLocked(allocator, id, revision_no);
+    }
+
+    /// Snapshot content that the submitted form version was based on. State
+    /// changes such as pin may advance note_version without changing text, so
+    /// the latest content snapshot at or before the version is the correct base.
+    pub fn revisionAtVersion(self: *Db, allocator: Allocator, id: i64, note_version: i64) !?Revision {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare(
+            \\SELECT id, note_id, revision_no, note_version, title, body, is_pinned,
+            \\       deleted_at, created_at, origin, action, summary, checksum
+            \\FROM note_revisions WHERE note_id = ? AND note_version <= ?
+            \\ORDER BY note_version DESC, revision_no DESC LIMIT 1
+        );
+        defer stmt.deinit();
+        try stmt.bindInt(1, id);
+        try stmt.bindInt(2, note_version);
+        if (try stmt.step() != c.SQLITE_ROW) return null;
+        return try self.revisionFromRowLocked(&stmt, allocator);
     }
 
     pub fn listRevisions(
@@ -1479,6 +1502,9 @@ test "revision engine: immutable snapshots, no-op, conflict and restore" {
     try testing.expectEqualStrings("alpha\ngamma", second.body);
     try testing.expectEqual(Origin.mcp, second.origin);
     try testing.expect(!std.mem.eql(u8, first.checksum, second.checksum));
+    const base_at_v1 = (try db.revisionAtVersion(arena, id, 1)).?;
+    try testing.expectEqual(@as(i64, 1), base_at_v1.revision_no);
+    try testing.expectEqualStrings("alpha\nbeta", base_at_v1.body);
 
     // A stale write returns conflict and appends nothing.
     try testing.expectEqual(WriteResult.conflict, try db.updateNoteFrom(id, 1, "Stale", "nope", 1003, .web));
