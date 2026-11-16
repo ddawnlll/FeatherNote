@@ -47,9 +47,9 @@ itself; checks below name the test that proves the claim.
    database growth for 100k revisions, and disk-full/WAL fault injection before
    claiming the roadmap's proposed targets.
 3. **#7 remaining:** callouts, math, highlighting, diagrams, templates.
-4. **#8–#14 remaining:** folders/tags/links, search filters, media library,
-   mobile/print/a11y audit, verified backups/doctor/import/export, MCP change
-   cursor and collections, migration/fault gates.
+4. **#8–#14 remaining:** folders/tags/links, search filters, media library and
+   asset-event ledger, remaining mobile/keyboard/screen-reader audit, portable
+   export/import, MCP change cursor and collections, disk-full/fault gates.
 
 ## Blockers
 
