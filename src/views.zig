@@ -231,7 +231,9 @@ pub fn readNote(
     if (note.is_pinned) try w.writeAll("<dt>Status</dt><dd>Pinned</dd>");
     try w.writeAll("</dl><div class=\"rail-actions\"><a class=\"button primary\" href=\"/notes/");
     try w.print("{d}/edit", .{note.id});
-    try w.writeAll("\">Edit note</a><form method=\"post\" action=\"/notes/");
+    try w.writeAll("\">Edit note</a><a class=\"button secondary\" href=\"/notes/");
+    try w.print("{d}/focus", .{note.id});
+    try w.writeAll("\">Focus mode</a><form method=\"post\" action=\"/notes/");
     try w.print("{d}/pin", .{note.id});
     try w.writeAll("\">");
     try csrfField(w, ctx.csrf);
@@ -265,6 +267,29 @@ pub fn readNote(
     try attachmentSection(w, ctx, note.id, attachments, false);
     try w.writeAll("</article></div>\n");
     try documentEnd(w);
+}
+
+pub fn focusNote(w: *Writer, ctx: Ctx, note: db.Note) !void {
+    try w.writeAll("<!doctype html>\n<html lang=\"en\" data-theme=\"");
+    try w.writeAll(themeId(ctx));
+    try w.writeAll("\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>");
+    try util.escapeHtml(w, displayTitle(note.title));
+    try w.writeAll(" · FeatherNote</title>\n<link rel=\"stylesheet\" href=\"/style.css\">\n</head>\n<body class=\"focus-body\">\n");
+    try w.writeAll("<a class=\"skip\" href=\"#main\">Skip to content</a>\n<nav class=\"focus-bar\" aria-label=\"Focus mode\"><a href=\"/notes/");
+    try w.print("{d}", .{note.id});
+    try w.writeAll("\">← Back to note</a><span>Focus reading</span><span class=\"muted small\">Version ");
+    try w.print("{d}", .{note.version});
+    try w.writeAll(" · ");
+    try util.formatDateFull(w, note.updated_at);
+    try w.writeAll("</span></nav>\n<main id=\"main\" class=\"focus-main\"><article><header class=\"focus-head\"><h1>");
+    try util.escapeHtml(w, displayTitle(note.title));
+    try w.writeAll("</h1></header><div class=\"prose\">");
+    if (note.body.len == 0) {
+        try w.writeAll("<p class=\"muted\">This note is empty.</p>");
+    } else {
+        try markdown.render(w, note.body);
+    }
+    try w.writeAll("</div></article></main>\n<footer class=\"foot focus-foot\"><span>FeatherNote</span><span>No scripts. No tracking.</span></footer>\n</body>\n</html>\n");
 }
 
 fn attachmentSection(w: *Writer, ctx: Ctx, note_id: i64, attachments: []const db.Attachment, include_delete: bool) !void {

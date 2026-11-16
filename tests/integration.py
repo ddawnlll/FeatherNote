@@ -232,6 +232,19 @@ def main():
               b"<script>alert" not in body and b"&lt;script&gt;" in body and b"&lt;/textarea&gt;" in body)
         check("UTF-8 round trip", "Grüße aus Köln".encode() in body and "日本語".encode() in body)
 
+        status, _, focus = c.get(note_url + "/focus")
+        check("focus mode renders the note", status == 200 and b"Focus reading" in focus
+              and b"Back to note" in focus and b'class="prose"' in focus)
+        check("focus mode omits site chrome and scripts",
+              b'class="top"' not in focus and b"<script" not in focus
+              and b"Edit note" not in focus and b"/style.css" in focus)
+        status, _, _ = c.get("/notes/999999/focus")
+        check("focus mode 404s for unknown note", status == 404, status)
+        status, _, css = c.get("/style.css")
+        check("print stylesheet hides chrome and prints link targets",
+              status == 200 and b"@media print" in css and b".focus-bar" in css
+              and b'attr(href)' in css)
+
         status, _, body = c.get("/notes")
         check("list includes escaped title", b"Gr&uuml;" not in body and b"&lt;script&gt;" in body)
 

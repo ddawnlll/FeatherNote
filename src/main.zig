@@ -685,6 +685,10 @@ fn dispatch(
             if (sub_action != null or final_action != null) return notFound(arena, ctx);
             if (!isReadMethod(method)) return methodNotAllowed(arena, ctx, "GET, HEAD");
             return handleCompare(app, arena, ctx, id, query);
+        } else if (std.mem.eql(u8, act, "focus")) {
+            if (sub_action != null or final_action != null) return notFound(arena, ctx);
+            if (!isReadMethod(method)) return methodNotAllowed(arena, ctx, "GET, HEAD");
+            return handleFocus(app, arena, ctx, id);
         } else if (std.mem.eql(u8, act, "files")) {
             const sub = sub_action orelse "";
             if (final_action == null) {
@@ -949,6 +953,17 @@ fn handleRead(app: *App, arena: Allocator, ctx: views.Ctx, id: i64, saved: bool)
     const attachments = try app.database.attachmentsForNote(arena, id);
     var aw = std.Io.Writer.Allocating.init(arena);
     try views.readNote(&aw.writer, ctx, note, sidebar_rows, attachments, saved);
+    return .{ .status = .ok, .body = aw.written() };
+}
+
+fn handleFocus(app: *App, arena: Allocator, ctx: views.Ctx, id: i64) !Response {
+    const note = try app.database.getNote(arena, id, false) orelse {
+        const trashed = try app.database.getNote(arena, id, true);
+        if (trashed != null) return .{ .status = .see_other, .location = "/trash" };
+        return notFound(arena, ctx);
+    };
+    var aw = std.Io.Writer.Allocating.init(arena);
+    try views.focusNote(&aw.writer, ctx, note);
     return .{ .status = .ok, .body = aw.written() };
 }
 

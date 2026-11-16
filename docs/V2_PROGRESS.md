@@ -20,6 +20,7 @@ itself; checks below name the test that proves the claim.
 | Historical export (F11) | Exact Markdown download plus JSON title/checksum/asset manifest per revision; safe attachment filename; GET-only. |
 | Named checkpoints (F06) | 80-character labels on any revision; CSRF web form and MCP `set_revision_label`; labels excluded from checksums and no pruning job exists. |
 | Read-only doctor and verified backups (F59/F62 partial) | `admin doctor` checks integrity, FKs, FTS parity, revision chains/checksums, head agreement, asset manifests, attachment ownership and labels; backup/restore scripts run it. |
+| Focus reading and print output (F52, F55) | `GET /notes/{id}/focus` renders semantic prose without site chrome in the same CSP; `@media print` hides controls and prints external link targets; integration checks assert no scripts and the print rules. |
 
 ## Measured evidence (this iteration)
 
