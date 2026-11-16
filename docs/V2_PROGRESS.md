@@ -9,7 +9,7 @@ itself; checks below name the test that proves the claim.
 
 | Work | Evidence |
 |---|---|
-| Renderer PR #4 (F13, F14) | Merged to `master`; `zig build test`, 170 HTTP checks, 52 MCP checks; vendored MD4C checksums verified; XSS fixtures escaped. |
+| Renderer PR #4 (F13, F14) | Merged to `master`; `zig build test`, 177 HTTP checks, 55 MCP checks; vendored MD4C checksums verified; XSS fixtures escaped. |
 | Zero-JS block editor PR #5 (F15–F18) | Merged after retargeting to `master`; preview/draft/conflict tests green. |
 | Roadmap PR #15 | Merged; 80 feature IDs and release gates are now on `master`. |
 | Revision engine foundation (F01, F02 read model, F04, F05, F07, F09, F11 source, F12 default) | `migrations/0004_revisions.sql`, one transactional writer for Web and MCP, migration baseline test, no-op/conflict tests. |
@@ -18,22 +18,23 @@ itself; checks below name the test that proves the claim.
 | MCP revisions (F66 partial, F69 writer) | `list_revisions`, `get_revision`, `compare_revisions`, `restore_revision`; read-only mode hides the write tool. |
 | Three-way conflicts (F10) | 409 page shows the exact base revision, base→latest diff and base→draft diff with the draft preserved; no automatic merge. |
 | Historical export (F11) | Exact Markdown download plus JSON title/checksum/asset manifest per revision; safe attachment filename; GET-only. |
+| Named checkpoints (F06) | 80-character labels on any revision; CSRF web form and MCP `set_revision_label`; labels excluded from checksums and no pruning job exists. |
 
 ## Measured evidence (this iteration)
 
 - `zig build test`: pass (including revision lifecycle, no-op, conflict,
   restore, attachment manifest, v3→v4 baseline migration, bounded diff).
-- `python3 tests/integration.py`: 170 passed, 0 failed.
-- `python3 tests/mcp_test.py`: 52 passed, 0 failed.
+- `python3 tests/integration.py`: 177 passed, 0 failed.
+- `python3 tests/mcp_test.py`: 55 passed, 0 failed.
 - Zero client JavaScript: history and diff pages are server-rendered forms and
   escaped HTML; integration checks assert no `<script>` in revision/compare
   responses.
 
 ## Open / next unblocked
 
-1. **F06 named checkpoints and F12 retention/purge.** Schema and history are
-   append-only by default; checkpoint labels and verified purge are not yet
-   implemented.
+1. **F12 retention/purge.** History is append-only by default; checkpoint
+   labels exist, but an explicit retention policy and verified purge are not
+   implemented. Any purge must protect non-empty labels.
 2. **Attachment removal is not itself a revision event yet.** The note bytes
    are unchanged when a file is removed, so no note revision is appended; the
    previous revision's manifest and bytes remain valid. A dedicated asset event

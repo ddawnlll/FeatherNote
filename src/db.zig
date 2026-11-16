@@ -101,6 +101,7 @@ pub const Revision = struct {
     action: RevisionAction,
     summary: []const u8,
     checksum: []const u8,
+    label: []const u8,
 };
 
 pub const RevisionRow = struct {
@@ -112,6 +113,7 @@ pub const RevisionRow = struct {
     action: RevisionAction,
     summary: []const u8,
     checksum: []const u8,
+    label: []const u8,
 };
 
 pub const RevisionAsset = struct {
@@ -219,7 +221,7 @@ pub const Db = struct {
             \\SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
         );
         const current = self.schemaVersion() catch return DbError.MigrationFailed;
-        if (current > 4) return DbError.VersionMismatch;
+        if (current > 5) return DbError.VersionMismatch;
         if (current == 0) {
             try self.execRaw("BEGIN IMMEDIATE;");
             errdefer _ = self.execRaw("ROLLBACK;") catch {};
@@ -247,6 +249,13 @@ pub const Db = struct {
             try self.execRaw(assets.migration_0004);
             try self.seedBaselineRevisions();
             try self.execRaw("UPDATE schema_meta SET version = 4;");
+            try self.execRaw("COMMIT;");
+        }
+        if (current <= 4) {
+            try self.execRaw("BEGIN IMMEDIATE;");
+            errdefer _ = self.execRaw("ROLLBACK;") catch {};
+            try self.execRaw(assets.migration_0005);
+            try self.execRaw("UPDATE schema_meta SET version = 5;");
             try self.execRaw("COMMIT;");
         }
     }
@@ -1053,13 +1062,14 @@ pub const Db = struct {
             .action = std.meta.stringToEnum(RevisionAction, action_text) orelse .update,
             .summary = try self.columnText(stmt, 11, allocator),
             .checksum = try self.columnText(stmt, 12, allocator),
+            .label = try self.columnText(stmt, 13, allocator),
         };
     }
 
     fn getRevisionLocked(self: *Db, allocator: Allocator, id: i64, revision_no: i64) !?Revision {
         var stmt = try self.prepare(
             \\SELECT id, note_id, revision_no, note_version, title, body, is_pinned,
-            \\       deleted_at, created_at, origin, action, summary, checksum
+            \\       deleted_at, created_at, origin, action, summary, checksum, label
             \\FROM note_revisions WHERE note_id = ? AND revision_no = ?
         );
         defer stmt.deinit();
@@ -1083,7 +1093,7 @@ pub const Db = struct {
         defer self.mutex.unlock(self.io);
         var stmt = try self.prepare(
             \\SELECT id, note_id, revision_no, note_version, title, body, is_pinned,
-            \\       deleted_at, created_at, origin, action, summary, checksum
+            \\       deleted_at, created_at, origin, action, summary, checksum, label
             \\FROM note_revisions WHERE note_id = ? AND note_version <= ?
             \\ORDER BY note_version DESC, revision_no DESC LIMIT 1
         );
@@ -1104,7 +1114,7 @@ pub const Db = struct {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
         var stmt = try self.prepare(
-            \\SELECT revision_no, note_version, title, created_at, origin, action, summary, checksum
+            \\SELECT revision_no, note_version, title, created_at, origin, action, summary, checksum, label
             \\FROM note_revisions WHERE note_id = ?
             \\ORDER BY revision_no DESC LIMIT ? OFFSET ?
         );
@@ -1128,9 +1138,26 @@ pub const Db = struct {
                 .action = std.meta.stringToEnum(RevisionAction, action_text) orelse .update,
                 .summary = try self.columnText(&stmt, 6, allocator),
                 .checksum = try self.columnText(&stmt, 7, allocator),
+                .label = try self.columnText(&stmt, 8, allocator),
             });
         }
         return rows.toOwnedSlice(allocator);
+    }
+
+    /// Labels are annotations on immutable revisions, not new revisions. The
+    /// content checksum intentionally excludes the label.
+    pub fn setRevisionLabel(self: *Db, id: i64, revision_no: i64, label: []const u8) !bool {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare(
+            "UPDATE note_revisions SET label = ? WHERE note_id = ? AND revision_no = ?",
+        );
+        defer stmt.deinit();
+        try stmt.bindText(1, label);
+        try stmt.bindInt(2, id);
+        try stmt.bindInt(3, revision_no);
+        if (try stmt.step() != c.SQLITE_DONE) return error.Sqlite;
+        return c.sqlite3_changes(self.handle) == 1;
     }
 
     pub fn countRevisions(self: *Db, id: i64) !i64 {
@@ -1489,6 +1516,13 @@ test "revision engine: immutable snapshots, no-op, conflict and restore" {
     try testing.expectEqual(Origin.web, first.origin);
     try testing.expectEqual(RevisionAction.create, first.action);
     try testing.expectEqual(@as(usize, 64), first.checksum.len);
+    try testing.expect(try db.setRevisionLabel(id, 1, "original draft"));
+    const labelled = (try db.getRevision(arena, id, 1)).?;
+    try testing.expectEqualStrings("original draft", labelled.label);
+    const labelled_rows = try db.listRevisions(arena, id, 0, 10);
+    try testing.expectEqualStrings("original draft", labelled_rows[0].label);
+    try testing.expect(try db.setRevisionLabel(id, 1, ""));
+    try testing.expectEqualStrings("", (try db.getRevision(arena, id, 1)).?.label);
 
     // A no-op save does not bump the version or invent a revision.
     try testing.expectEqual(WriteResult.ok, try db.updateNoteFrom(id, 1, "Original", "alpha\nbeta", 1001, .mcp));
@@ -1576,7 +1610,7 @@ test "v4 migration seeds one baseline revision without fabricating history" {
 
     db = try Db.open(testing.allocator, io, db_path);
     defer db.close(testing.allocator);
-    try testing.expectEqual(@as(i64, 4), try db.schemaVersion());
+    try testing.expectEqual(@as(i64, 5), try db.schemaVersion());
     try testing.expectEqual(@as(i64, 1), try db.countRevisions(id));
     const baseline = (try db.getRevision(arena, id, 1)).?;
     try testing.expectEqual(RevisionAction.baseline, baseline.action);

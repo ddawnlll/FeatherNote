@@ -182,3 +182,17 @@ the latest version and is checked again by the normal writer. Conflict diffs
 are capped at 2,000 rendered lines and use escaped text. This satisfies the
 deliberate three-way review requirement without pretending to resolve
 overlapping edits automatically.
+
+## D023 — Checkpoint labels annotate revisions without rewriting them
+
+Migration `0005_checkpoints` adds a `label` text column (empty string means no
+label) with an 80-character check and a partial index for labelled revisions.
+A label is metadata: setting or clearing it does not append a revision, bump
+the note version, or change the content checksum. Handlers trim surrounding
+spaces, require valid UTF-8, reject control characters and cap the label at 80
+bytes; MCP applies the same rule.
+
+History and revision detail show labels, and the detail page has a CSRF-
+protected form to set or clear one. Because FeatherNote has no retention job,
+labelled revisions cannot be pruned by accident; when retention is added it
+must explicitly protect non-empty labels.
