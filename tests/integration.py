@@ -218,6 +218,42 @@ def main():
         check("theme change requires CSRF", status == 403, status)
         c.form("/settings/theme", {"theme": "paper"}, csrf=csrf)
 
+        # Issue #12 F64: per-session inventory and selective revocation.
+        c2 = Client(port)
+        login(c2)
+        c3 = Client(port)
+        login(c3)
+        status, _, inventory = c.get("/settings")
+        check("settings lists all active sessions",
+              status == 200 and b"3 active sessions" in inventory
+              and b"This browser" in inventory, inventory[:200])
+        tokens = re.findall(rb'name="token_hash" value="([0-9a-f]{64})"', inventory)
+        check("inventory exposes one revoke form per other session", len(tokens) == 2, len(tokens))
+        status, headers, _ = c.form("/settings/sessions/revoke",
+                                    {"token_hash": tokens[0].decode()},
+                                    csrf=csrf_of(inventory))
+        check("selective revoke redirects", status == 303 and headers.get("location") == "/settings?revoked=1",
+              f"{status} {headers}")
+        statuses = (c2.get("/notes")[0], c3.get("/notes")[0])
+        check("selective revoke ends exactly one other session",
+              sorted(statuses) == [200, 303], statuses)
+        status, _, inventory = c.get("/settings")
+        check("inventory drops the revoked session",
+              status == 200 and b"2 active sessions" in inventory)
+        status, headers, _ = c.form("/settings/sessions/revoke-others", {},
+                                    csrf=csrf_of(inventory))
+        check("revoke all others redirects",
+              status == 303 and headers.get("location") == "/settings?revoked_all=1",
+              f"{status} {headers}")
+        statuses = (c2.get("/notes")[0], c3.get("/notes")[0])
+        check("revoke all others ends both other sessions", statuses == (303, 303), statuses)
+        status, _, inventory = c.get("/settings?revoked_all=1")
+        check("current session survives revocation",
+              status == 200 and b"1 active session." in inventory
+              and b"All other sessions were revoked." in inventory)
+        status, _, _ = c.form("/settings/sessions/revoke-others", {}, csrf="0" * 64)
+        check("session revocation requires CSRF", status == 403, status)
+
         status, _, body = c.get("/notes/new")
         csrf = csrf_of(body)
         check("new note form has CSRF token", status == 200 and csrf is not None)
