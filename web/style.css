@@ -524,6 +524,11 @@ button.link:hover, .link:hover { color: var(--fg); text-decoration: underline; t
 .focus-main .prose { font-size: clamp(1.02rem, 1.4vw, 1.16rem); }
 .focus-foot { max-width: 46rem; margin: 0 auto; padding: var(--space-6); border-top: 1px solid var(--line); }
 
+.sessions { margin-top: var(--space-12); padding-top: var(--space-8); border-top: 1px solid var(--line); }
+.sessions h2 { margin: 0 0 var(--space-2); font: 600 var(--text-lg)/1.3 var(--font-display); }
+.sessions .history-table { margin-top: var(--space-4); }
+.sessions .secondary-actions { margin-top: var(--space-4); }
+
 @media (max-width: 700px) {
   .focus-main { padding: var(--space-8) var(--space-4); }
   .focus-bar { padding: var(--space-3) var(--space-4); }

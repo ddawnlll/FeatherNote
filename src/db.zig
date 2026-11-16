@@ -54,6 +54,13 @@ pub const Session = struct {
     csrf_token: []const u8,
 };
 
+pub const SessionRow = struct {
+    token_hash: []const u8,
+    issued_at: i64,
+    last_used_at: i64,
+    expires_at: i64,
+};
+
 pub const Attachment = struct {
     id: i64,
     note_id: i64,
@@ -493,6 +500,54 @@ pub const Db = struct {
         defer stmt.deinit();
         try stmt.bindText(1, token_hash);
         _ = try stmt.step();
+    }
+
+    pub fn listSessions(self: *Db, allocator: Allocator, now: i64) ![]SessionRow {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare(
+            \\SELECT token_hash, issued_at, last_used_at, expires_at
+            \\FROM sessions WHERE revoked = 0 AND expires_at > ?
+            \\ORDER BY issued_at DESC, token_hash
+        );
+        defer stmt.deinit();
+        try stmt.bindInt(1, now);
+        var rows: std.ArrayList(SessionRow) = .empty;
+        errdefer rows.deinit(allocator);
+        while (try stmt.step() == c.SQLITE_ROW) {
+            try rows.append(allocator, .{
+                .token_hash = try self.columnText(&stmt, 0, allocator),
+                .issued_at = c.sqlite3_column_int64(stmt.handle, 1),
+                .last_used_at = c.sqlite3_column_int64(stmt.handle, 2),
+                .expires_at = c.sqlite3_column_int64(stmt.handle, 3),
+            });
+        }
+        return rows.toOwnedSlice(allocator);
+    }
+
+    pub fn revokeOneSession(self: *Db, token_hash: []const u8) !bool {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare(
+            "UPDATE sessions SET revoked = 1 WHERE token_hash = ? AND revoked = 0",
+        );
+        defer stmt.deinit();
+        try stmt.bindText(1, token_hash);
+        if (try stmt.step() != c.SQLITE_DONE) return error.Sqlite;
+        return c.sqlite3_changes(self.handle) == 1;
+    }
+
+    pub fn revokeOtherSessions(self: *Db, keep_hash: []const u8, now: i64) !usize {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var stmt = try self.prepare(
+            "UPDATE sessions SET revoked = 1 WHERE token_hash <> ? AND revoked = 0 AND expires_at > ?",
+        );
+        defer stmt.deinit();
+        try stmt.bindText(1, keep_hash);
+        try stmt.bindInt(2, now);
+        if (try stmt.step() != c.SQLITE_DONE) return error.Sqlite;
+        return @intCast(c.sqlite3_changes(self.handle));
     }
 
     // ---- appearance ----
@@ -2201,4 +2256,36 @@ test "sessions and owner" {
     try testing.expect((try db.findSession(arena, "hash1", 1001)) == null);
     try db.revokeSession("hash1");
     try testing.expect((try db.findSession(arena, "hash1", 101)) == null);
+}
+
+test "session inventory revokes selectively and preserves the current session" {
+    const testing = std.testing;
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try std.fs.path.join(testing.allocator, &.{ ".zig-cache/tmp", &tmp.sub_path, "session-list.db" });
+    defer testing.allocator.free(db_path);
+
+    const db = try Db.open(testing.allocator, io, db_path);
+    defer db.close(testing.allocator);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try db.setOwnerPassword("$argon2id$fake", 100);
+    try db.createSession("hash-one", "csrf1", 100, 1000);
+    try db.createSession("hash-two", "csrf2", 200, 1200);
+    try db.createSession("hash-three", "csrf3", 300, 1300);
+    const rows = try db.listSessions(arena, 400);
+    try testing.expectEqual(@as(usize, 3), rows.len);
+    try testing.expectEqualStrings("hash-three", rows[0].token_hash);
+
+    try testing.expect(try db.revokeOneSession("hash-two"));
+    try testing.expect(!try db.revokeOneSession("hash-two"));
+    try testing.expectEqual(@as(usize, 2), (try db.listSessions(arena, 400)).len);
+    try testing.expectEqual(@as(usize, 1), try db.revokeOtherSessions("hash-three", 400));
+    const remaining = try db.listSessions(arena, 400);
+    try testing.expectEqual(@as(usize, 1), remaining.len);
+    try testing.expectEqualStrings("hash-three", remaining[0].token_hash);
+    try testing.expectEqual(@as(usize, 0), try db.revokeOtherSessions("hash-three", 400));
 }

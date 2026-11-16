@@ -608,9 +608,24 @@ fn dispatch(
 
     if (std.mem.eql(u8, path, "/settings")) {
         if (!isReadMethod(method)) return methodNotAllowed(arena, ctx, "GET, HEAD");
+        const sessions = try app.database.listSessions(arena, now);
         var aw = std.Io.Writer.Allocating.init(arena);
-        try views.settings(&aw.writer, ctx, queryFlag(raw_query, "saved"));
+        try views.settings(&aw.writer, ctx, .{
+            .saved = queryFlag(raw_query, "saved"),
+            .revoked = queryFlag(raw_query, "revoked"),
+            .revoked_all = queryFlag(raw_query, "revoked_all"),
+            .sessions = sessions,
+            .current_hash = &a.token_hash,
+        });
         return .{ .status = .ok, .body = aw.written() };
+    }
+    if (std.mem.eql(u8, path, "/settings/sessions/revoke")) {
+        if (method != .POST) return methodNotAllowed(arena, ctx, "POST");
+        return handleRevokeSession(app, request, arena, ctx, &a.token_hash, content_type);
+    }
+    if (std.mem.eql(u8, path, "/settings/sessions/revoke-others")) {
+        if (method != .POST) return methodNotAllowed(arena, ctx, "POST");
+        return handleRevokeOtherSessions(app, request, arena, ctx, &a.token_hash, content_type);
     }
     if (std.mem.eql(u8, path, "/settings/theme")) {
         if (method != .POST) return methodNotAllowed(arena, ctx, "POST");
@@ -865,6 +880,55 @@ fn handleTheme(app: *App, request: *http.Server.Request, arena: Allocator, ctx: 
     if (!themes.isValid(theme)) return htmlError(arena, ctx, .bad_request, "Unknown theme", "That theme does not exist.");
     try app.database.setTheme(theme);
     return .{ .status = .see_other, .location = "/settings?saved=1" };
+}
+
+fn handleRevokeSession(
+    app: *App,
+    request: *http.Server.Request,
+    arena: Allocator,
+    ctx: views.Ctx,
+    current_hash: []const u8,
+    content_type: ?[]const u8,
+) !Response {
+    if (!isFormContentType(content_type)) {
+        return htmlError(arena, ctx, .unsupported_media_type, "Unsupported form", "Submit the session form.");
+    }
+    const body = readBody(request, arena) catch return bodyErrorResponse(arena, ctx, request, content_type);
+    const form = util.parseForm(arena, body) catch {
+        return htmlError(arena, ctx, .bad_request, "Bad request", "Malformed session form.");
+    };
+    if (!csrfOk(ctx.csrf, form)) return csrfFailure(arena, ctx);
+    const token_hash = form.get("token_hash") orelse {
+        return htmlError(arena, ctx, .bad_request, "Bad request", "The session identifier is missing.");
+    };
+    if (auth.tokenHashFromHex(token_hash) == null) {
+        return htmlError(arena, ctx, .bad_request, "Bad request", "The session identifier is invalid.");
+    }
+    if (std.mem.eql(u8, token_hash, current_hash)) {
+        return htmlError(arena, ctx, .bad_request, "Current session", "Use Log out to end this browser's session.");
+    }
+    _ = try app.database.revokeOneSession(token_hash);
+    return .{ .status = .see_other, .location = "/settings?revoked=1" };
+}
+
+fn handleRevokeOtherSessions(
+    app: *App,
+    request: *http.Server.Request,
+    arena: Allocator,
+    ctx: views.Ctx,
+    current_hash: []const u8,
+    content_type: ?[]const u8,
+) !Response {
+    if (!isFormContentType(content_type)) {
+        return htmlError(arena, ctx, .unsupported_media_type, "Unsupported form", "Submit the session form.");
+    }
+    const body = readBody(request, arena) catch return bodyErrorResponse(arena, ctx, request, content_type);
+    const form = util.parseForm(arena, body) catch {
+        return htmlError(arena, ctx, .bad_request, "Bad request", "Malformed session form.");
+    };
+    if (!csrfOk(ctx.csrf, form)) return csrfFailure(arena, ctx);
+    _ = try app.database.revokeOtherSessions(current_hash, nowSeconds(app.io));
+    return .{ .status = .see_other, .location = "/settings?revoked_all=1" };
 }
 
 fn findPart(parts: []const multipart.Part, name: []const u8) ?multipart.Part {

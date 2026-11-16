@@ -155,6 +155,14 @@ the password, a local operator resets it and revokes every session.
 
 ![Login page](docs/screenshots/login.png)
 
+### Active sessions
+
+Settings lists every unexpired session with its sign-in time, last use and
+expiry. The current browser is marked; other rows can be revoked individually
+or all at once with a CSRF-protected POST. A revoked browser is redirected to
+the login page on its next request. The page shows only a short fingerprint of
+each stored token hash; the cookie token itself is never rendered.
+
 ### Starting a new note
 
 The composer is a title and a Markdown text box. Save once before attaching
@@ -368,7 +376,7 @@ server reads plaintext.
 
 ```sh
 zig build test                 # unit tests: Markdown, diff, revisions, CRUD, search
-python3 tests/integration.py   # 195 real HTTP checks, no JavaScript
+python3 tests/integration.py   # 210 real HTTP checks, no JavaScript
 python3 tests/mcp_test.py      # 55 stdio MCP protocol checks
 python3 scripts/bench.py --requests 200 --counts 100,10000
 ```

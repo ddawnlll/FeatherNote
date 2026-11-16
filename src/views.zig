@@ -622,10 +622,20 @@ pub fn deleteConfirm(w: *Writer, ctx: Ctx, note: db.Note) !void {
     try documentEnd(w);
 }
 
-pub fn settings(w: *Writer, ctx: Ctx, saved: bool) !void {
+pub const SettingsArgs = struct {
+    saved: bool = false,
+    revoked: bool = false,
+    revoked_all: bool = false,
+    sessions: []const db.SessionRow = &.{},
+    current_hash: []const u8 = "",
+};
+
+pub fn settings(w: *Writer, ctx: Ctx, args: SettingsArgs) !void {
     try documentStart(w, "Themes", ctx, null);
     try pageHead(w, "Themes", "Twelve palettes, stored in your database, applied on the server.");
-    if (saved) try statusMessage(w, "Theme updated.");
+    if (args.saved) try statusMessage(w, "Theme updated.");
+    if (args.revoked) try statusMessage(w, "Session revoked.");
+    if (args.revoked_all) try statusMessage(w, "All other sessions were revoked.");
     try w.writeAll("<form method=\"post\" action=\"/settings/theme\" class=\"theme-form\">");
     try csrfField(w, ctx.csrf);
     try w.writeAll("<div class=\"theme-grid\">\n");
@@ -645,6 +655,47 @@ pub fn settings(w: *Writer, ctx: Ctx, saved: bool) !void {
     }
     try w.writeAll("</div><div class=\"actions\"><button type=\"submit\" class=\"primary\">Apply theme</button></div></form>\n");
     try w.writeAll("<p class=\"muted small\">The choice lives in the owner row, so backups carry it too.</p>\n");
+    try w.writeAll("<section class=\"sessions\"><h2>Sessions</h2><p class=\"page-meta\">");
+    try w.print("{d} active session{s}. Each sign-in gets its own token; revoking one logs that browser out immediately.", .{
+        args.sessions.len,
+        if (args.sessions.len == 1) "" else "s",
+    });
+    try w.writeAll("</p><table class=\"history-table\"><thead><tr><th scope=\"col\">Session</th><th scope=\"col\">Signed in</th><th scope=\"col\">Last used</th><th scope=\"col\">Expires</th><th scope=\"col\">Action</th></tr></thead><tbody>\n");
+    for (args.sessions) |session| {
+        const is_current = std.mem.eql(u8, session.token_hash, args.current_hash);
+        try w.writeAll("<tr><th scope=\"row\">");
+        if (is_current) {
+            try w.writeAll("This browser");
+        } else {
+            try w.writeAll("Session <code>");
+            try util.escapeHtml(w, session.token_hash[0..@min(session.token_hash.len, 8)]);
+            try w.writeAll("</code>");
+        }
+        try w.writeAll("</th><td>");
+        try util.formatDateFull(w, session.issued_at);
+        try w.writeAll("</td><td>");
+        try util.formatDateFull(w, session.last_used_at);
+        try w.writeAll("</td><td>");
+        try util.formatDateFull(w, session.expires_at);
+        try w.writeAll("</td><td>");
+        if (is_current) {
+            try w.writeAll("<span class=\"muted small\">Current</span>");
+        } else {
+            try w.writeAll("<form method=\"post\" action=\"/settings/sessions/revoke\">");
+            try csrfField(w, ctx.csrf);
+            try w.writeAll("<input type=\"hidden\" name=\"token_hash\" value=\"");
+            try util.escapeHtml(w, session.token_hash);
+            try w.writeAll("\"><button type=\"submit\" class=\"button secondary\">Revoke</button></form>");
+        }
+        try w.writeAll("</td></tr>\n");
+    }
+    try w.writeAll("</tbody></table>\n");
+    if (args.sessions.len > 1) {
+        try w.writeAll("<form method=\"post\" action=\"/settings/sessions/revoke-others\" class=\"secondary-actions\">");
+        try csrfField(w, ctx.csrf);
+        try w.writeAll("<button type=\"submit\" class=\"danger\">Revoke all other sessions</button></form>\n");
+    }
+    try w.writeAll("</section>\n");
     try documentEnd(w);
 }
 

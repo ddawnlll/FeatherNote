@@ -235,3 +235,17 @@ The restore drill in `tests/integration.py` takes an online backup while a
 writer is active, runs the doctor on it, copies it to a separate directory,
 starts a second server on the copy, logs in and reads the restored note. The
 backup command does not truncate, move or overwrite the source database.
+
+## D026 — Session inventory revokes only, never reveals tokens
+
+Sessions remain keyed by the SHA-256 of a 32-byte random cookie token. Settings
+lists unexpired, non-revoked rows with issued/last-used/expiry times and an
+eight-character fingerprint of the stored hash. Revoke forms carry the full
+stored hash in a hidden field; that hash cannot authenticate a request, and the
+cookie token is never written into HTML. Every revoke route is POST with CSRF.
+
+The current session is shown as "This browser" with no revoke control; ending
+it goes through Log out, which also expires the cookie. Selective revoke updates
+one row, revoke-all-others updates every other active row. There is no session
+identifier in a URL and no GET mutation, so a prefetched link cannot log a
+browser out.
