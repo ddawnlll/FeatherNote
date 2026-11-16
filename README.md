@@ -8,6 +8,8 @@ nothing of the browser beyond HTML and CSS.
 
 No registration. No tracking. No client JavaScript.
 
+[Visit the website](https://ddawnlll.github.io/FeatherNote/) · [Read the source](https://github.com/ddawnlll/FeatherNote)
+
 <p align="center">
   <img src="docs/screenshots/notes-list.png" alt="FeatherNote notes list" width="960">
 </p>
