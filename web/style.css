@@ -407,6 +407,20 @@ button.link:hover, .link:hover { color: var(--fg); text-decoration: underline; t
 .help { margin-top: var(--space-8); padding-top: var(--space-4); border-top: 1px solid var(--line); }
 .help summary { cursor: pointer; color: var(--fg); font: 600 var(--text-sm)/1.4 var(--font-ui); }
 .help pre { margin: var(--space-3) 0; padding: var(--space-4); overflow: auto; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius); font-size: 0.8rem; line-height: 1.55; }
+.preview { margin-top: var(--space-8); padding-top: var(--space-4); border-top: 1px solid var(--line); }
+.block { margin-top: var(--space-8); padding-top: var(--space-4); border-top: 1px solid var(--line); scroll-margin-top: var(--space-6); }
+.block-head { display: grid; gap: var(--space-2); }
+.block-head .rail-title { margin: 0; }
+.block-rendered { border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-3) var(--space-4); background: var(--surface); margin-top: var(--space-3); }
+.block-form, .block-ops { margin-top: var(--space-3); }
+.block-ops { display: flex; align-items: end; gap: var(--space-3); flex-wrap: wrap; }
+.block-ops label, .block-actions label { margin-top: 0; }
+.block-actions { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: center; margin-top: var(--space-3); }
+.inline-confirm { margin-top: var(--space-3); padding: var(--space-3) var(--space-4); border: 1px solid var(--danger); border-radius: var(--radius); }
+.cell-grid { width: 100%; border-collapse: collapse; margin-top: var(--space-3); }
+.cell-grid th, .cell-grid td { border: 1px solid var(--line); padding: 0.25rem; }
+.cell-grid input { width: 100%; min-width: 6rem; padding: 0.3rem 0.45rem; }
+.cell-grid select { width: auto; padding: 0.3rem 0.45rem; }
 .upload { margin-top: var(--space-8); padding-top: var(--space-4); border-top: 1px solid var(--line); }
 .upload form { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; margin-top: var(--space-3); }
 .upload input[type="file"] { width: auto; flex: 1 1 14rem; }

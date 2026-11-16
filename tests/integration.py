@@ -345,6 +345,20 @@ def main():
         status, _, edit2 = c.get(note_url + "/edit")
         check("source body unchanged by renders", b"Katsayi" in edit2 and b"[^1]: Footnote content" in edit2 and b"- [x] done" in edit2)
 
+        # A table directly after a list with no blank line still renders
+        # (GFM would swallow it as list text; the renderer inserts the
+        # separator), and the stored source is not rewritten.
+        status, _, edit_glued = c.get(note_url + "/edit")
+        glued_body = "- one item\n- two items\n| A | B |\n| --- | --- |\n| 1 | 2 |\n"
+        status, _, _ = c.form(note_url, {"title": "First update", "body": glued_body},
+                              csrf=csrf_of(edit_glued), version=version_of(edit_glued))
+        check("glued table save succeeds", status == 303, status)
+        status, _, read_glued = c.get(note_url)
+        check("table after list without blank line renders",
+              b"<table" in read_glued and b"<tbody" in read_glued and b"| A |" not in read_glued)
+        status, _, edit_glued2 = c.get(note_url + "/edit")
+        check("glued table source not rewritten", edit_glued2.count(b"- one item") == 1 and b"| A | B |" in edit_glued2)
+
         # Adversarial stored-XSS fixtures through the full save/render path.
         status, _, edit = c.get(note_url + "/edit")
         xss_body = ("<svg onload=alert(1)>\n\n<img src=x onerror=alert(1)>\n\n"
@@ -361,6 +375,100 @@ def main():
         check("xss fixture CSP still denies scripts", status == 200)
         status, _, edit = c.get(note_url + "/edit")
         check("xss fixture source preserved", b"onload=alert(1)" in edit and b"106;avascript" in edit)
+
+        # Issue #3: server-driven preview and block editor (still zero JS).
+        # NOTE: keep this fixture titled "First update"; the restart check below needs it.
+        status, _, edit = c.get(note_url + "/edit")
+        status, _, _ = c.form(note_url, {"title": "First update", "body": "First para\n\n## Head\n\n- [x] done\n"},
+                              csrf=csrf_of(edit), version=version_of(edit))
+        check("blocks fixture save succeeds", status == 303, status)
+        # Preview: draft rendered, database untouched.
+        status, _, edit = c.get(note_url + "/edit")
+        p_version = version_of(edit)
+        status, headers, preview = c.form(note_url + "/preview",
+                                          {"title": "Blocks Note", "body": "**Draft only**"},
+                                          csrf=csrf_of(edit), version=p_version)
+        check("preview renders unsaved draft", status == 200 and b"Draft only" in preview
+              and b"Preview (unsaved)" in preview)
+        status, _, after_preview = c.get(note_url + "/edit")
+        check("preview does not mutate the database", b"First para" in after_preview and b"Draft only" not in after_preview)
+        check("preview has no script tags", b"<script" not in preview)
+        status, _, _ = c.get(note_url + "/preview")
+        check("preview rejects GET", status == 405, status)
+        status, _, _ = c.form(note_url + "/preview", {"title": "x", "body": "y"}, csrf="0" * 64, version=p_version)
+        check("preview requires CSRF", status == 403, status)
+        status, _, new_preview = c.form("/notes/preview", {"title": "t", "body": "**brand new**"}, csrf=csrf_of(edit))
+        check("new-note preview renders", status == 200 and b"brand new" in new_preview)
+        # Block editor: list blocks, edit paragraph losslessly.
+        status, _, blocks_page = c.get(note_url + "/blocks")
+        check("block editor renders blocks", status == 200 and b"Block 1 of" in blocks_page
+              and b"First para" in blocks_page and b"Head" in blocks_page)
+        status, _, blocks_page = c.get(note_url + "/blocks")
+        bcsrf = csrf_of(blocks_page)
+        bversion = version_of(blocks_page)
+        status, headers, _ = c.form(note_url + "/blocks/update",
+                                    {"block": "0", "text": "First para edited"}, csrf=bcsrf, version=bversion)
+        check("block paragraph update redirects to anchor", status == 303 and headers.get("location") == note_url + "/blocks#block-0",
+              f"{status} {headers.get('location')}")
+        status, _, edit = c.get(note_url + "/edit")
+        check("block update saved exactly one block", b"First para edited" in edit and b"## Head" in edit and b"- [x] done" in edit)
+        # New-note preview writes nothing (no note count change check via list).
+        # Insert heading + checklist blocks.
+        status, _, blocks_page = c.get(note_url + "/blocks")
+        status, headers, _ = c.form(note_url + "/blocks/insert", {"after": "-1", "kind": "heading"},
+                                    csrf=csrf_of(blocks_page), version=version_of(blocks_page))
+        check("insert heading block redirects", status == 303 and headers.get("location") == note_url + "/blocks#block-0")
+        status, _, blocks_page = c.get(note_url + "/blocks")
+        status, headers, _ = c.form(note_url + "/blocks/insert", {"after": "0", "kind": "list_task"},
+                                    csrf=csrf_of(blocks_page), version=version_of(blocks_page))
+        check("insert checklist block redirects", status == 303 and headers.get("location") == note_url + "/blocks#block-1")
+        status, _, edit = c.get(note_url + "/edit")
+        check("inserted blocks are in source", b"## New heading" in edit and b"- [ ] task" in edit)
+        # Convert a paragraph to a checklist, duplicate, move, delete.
+        status, _, blocks_page = c.get(note_url + "/blocks")
+        cur_version = version_of(blocks_page)
+        status, headers, _ = c.form(note_url + "/blocks/duplicate", {"block": "0"}, csrf=csrf_of(blocks_page), version=cur_version)
+        check("duplicate redirects to new block", status == 303 and headers.get("location") == note_url + "/blocks#block-1")
+        status, _, blocks_page = c.get(note_url + "/blocks")
+        status, headers, _ = c.form(note_url + "/blocks/move", {"block": "1", "dir": "up"}, csrf=csrf_of(blocks_page), version=version_of(blocks_page))
+        check("move up redirects to new position", status == 303 and headers.get("location") == note_url + "/blocks#block-0")
+        status, _, blocks_page = c.get(note_url + "/blocks")
+        check("move up kept content", b"New heading" in blocks_page)
+        status, headers, _ = c.form(note_url + "/blocks/delete", {"block": "0"}, csrf=csrf_of(blocks_page), version=version_of(blocks_page))
+        check("delete redirects", status == 303)
+        status, _, edit = c.get(note_url + "/edit")
+        check("delete removed exactly one block", edit.count(b"New heading") == 1)
+        status, _, confirm_page = c.get(note_url + "/blocks?confirm=0")
+        check("delete confirmation renders without mutating", status == 200 and b"Delete this block?" in confirm_page)
+        # Table cell editing + add row.
+        status, _, blocks_page = c.get(note_url + "/blocks")
+        status, headers, _ = c.form(note_url + "/blocks/insert", {"after": "-1", "kind": "table"},
+                                    csrf=csrf_of(blocks_page), version=version_of(blocks_page))
+        check("insert table block", status == 303)
+        status, _, blocks_page = c.get(note_url + "/blocks")
+        t_version = version_of(blocks_page)
+        cells = {"block": "0", "cell_h_0": "Alpha", "cell_r0_c0": "1", "align_0": ""}
+        status, headers, _ = c.form(note_url + "/blocks/update", cells, csrf=csrf_of(blocks_page), version=t_version)
+        check("table cell update saves", status == 303)
+        status, _, blocks_page = c.get(note_url + "/blocks")
+        status, headers, _ = c.form(note_url + "/blocks/tableaddrow", {"block": "0"}, csrf=csrf_of(blocks_page), version=version_of(blocks_page))
+        check("table add row saves", status == 303)
+        status, _, edit = c.get(note_url + "/edit")
+        check("table source has edited cell and new row", b"Alpha" in edit and edit.count(b"| 1 |") + edit.count(b"|  |") >= 1)
+        # No-op roundtrip: reading the block editor twice keeps the same version (GETs never write).
+        status, _, blocks_v1 = c.get(note_url + "/blocks")
+        status, _, blocks_v2 = c.get(note_url + "/blocks")
+        check("block reads never change the version", version_of(blocks_v1) == version_of(blocks_v2))
+        # Stale block save -> 409 conflict with draft preserved.
+        status, _, blocks_page = c.get(note_url + "/blocks")
+        old_version = version_of(blocks_page)
+        status, _, _ = c.form(note_url + "/blocks/update", {"block": "0", "text": "changed once"}, csrf=csrf_of(blocks_page), version=old_version)
+        check("first block save succeeds", status == 303)
+        status, _, conflict_body = c.form(note_url + "/blocks/update", {"block": "0", "text": "stale attempt"}, csrf=csrf_of(blocks_page), version=old_version)
+        check("stale block save returns 409", status == 409)
+        check("conflict preserves draft", b"stale attempt" in conflict_body)
+        status, _, _ = c.get(note_url + "/blocks/unknown")
+        check("unknown block op is 404", status == 404, status)
 
         # File upload and delivery. SVG is deliberately served as a download.
         status, _, edit = c.get(note_url + "/edit")

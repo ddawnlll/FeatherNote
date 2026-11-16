@@ -1,6 +1,9 @@
 //! CommonMark/GFM rendering with safe embedded HTML.
 //!
 //! Pipeline:
+//!   0. Table-start separation: GFM tables cannot interrupt a paragraph or a
+//!      list, so a missing blank line before a table header is inserted at
+//!      render time (the stored Markdown is never rewritten).
 //!   1. Footnote preprocessing (`[^label]` definitions and references), which
 //!      MD4C does not implement natively.
 //!   2. MD4C 0.5.3 (vendored, MIT) with `MD_DIALECT_GITHUB`: tables, task
@@ -42,7 +45,8 @@ pub fn renderWithAlloc(alloc: Allocator, w: *Writer, source: []const u8) !void {
     var arena_state = std.heap.ArenaAllocator.init(alloc);
     defer arena_state.deinit();
     const inner = arena_state.allocator();
-    const footnote_state = try expandFootnotes(inner, source);
+    const separated = try separateTables(inner, source);
+    const footnote_state = try expandFootnotes(inner, separated);
     var combined = md4cToHtmlAlloc(inner, footnote_state.cleaned) catch {
         try writeEscapedFallback(w, source);
         return;
@@ -117,6 +121,102 @@ fn writeEscapedFallback(w: *Writer, source: []const u8) !void {
     try w.writeAll("<p>");
     try util.escapeHtml(w, source);
     try w.writeAll("</p>\n");
+}
+
+// ------------------------------------------------------- table separation
+
+fn lineIndent(text: []const u8) usize {
+    var n: usize = 0;
+    while (n < text.len and text[n] == ' ') : (n += 1) {}
+    if (n < text.len and text[n] == '\t') return 4;
+    return n;
+}
+
+fn lineIsBlank(text: []const u8) bool {
+    return std.mem.trim(u8, text, " \t\r").len == 0;
+}
+
+fn lineContainsPipe(text: []const u8) bool {
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        if (text[i] == '\\' and i + 1 < text.len and text[i + 1] == '|') {
+            i += 2;
+            continue;
+        }
+        if (text[i] == '|') return true;
+    }
+    return false;
+}
+
+fn lineIsTableDelimiter(text: []const u8) bool {
+    const t = std.mem.trim(u8, text, " \t\r");
+    if (t.len == 0 or !lineContainsPipe(t)) return false;
+    var cells = std.mem.splitScalar(u8, t, '|');
+    var saw_cell = false;
+    while (cells.next()) |cell| {
+        const c = std.mem.trim(u8, cell, " \t\r");
+        if (c.len == 0) continue;
+        var k = c;
+        if (k.len > 0 and k[0] == ':') k = k[1..];
+        if (k.len > 0 and k[k.len - 1] == ':') k = k[0 .. k.len - 1];
+        if (k.len == 0) return false;
+        for (k) |ch| if (ch != '-') return false;
+        saw_cell = true;
+    }
+    return saw_cell;
+}
+
+/// GFM tables cannot interrupt a paragraph or a list: the header line must
+/// be preceded by a blank line (or start the document). Authors frequently
+/// omit that blank line, and the whole table then renders as literal text.
+/// Insert the missing blank line before a detected table start (pipe header
+/// + delimiter row) when the previous line is non-blank and does not itself
+/// contain a pipe, outside fenced code and indented code. Render-time only:
+/// the stored Markdown is never rewritten. Returns the source unchanged when
+/// no separator is needed.
+fn separateTables(alloc: Allocator, source: []const u8) ![]const u8 {
+    var starts: std.ArrayList(usize) = .empty;
+    var lines: std.ArrayList(struct { start: usize, text: []const u8 }) = .empty;
+    var pos: usize = 0;
+    while (pos <= source.len) {
+        const nl = std.mem.findScalarPos(u8, source[pos..], 0, '\n');
+        const end = if (nl) |p| pos + p else source.len;
+        try lines.append(alloc, .{ .start = pos, .text = std.mem.trimEnd(u8, source[pos..end], "\r") });
+        if (nl == null) break;
+        pos = end + 1;
+    }
+    var fence: ?Fence = null;
+    var i: usize = 0;
+    while (i < lines.items.len) : (i += 1) {
+        const line = lines.items[i];
+        if (fence) |f| {
+            if (fenceMarker(line.text)) |m| {
+                if (m.ch == f.ch and m.n >= f.n) fence = null;
+            }
+            continue;
+        }
+        if (fenceMarker(line.text)) |m| {
+            fence = m;
+            continue;
+        }
+        if (i == 0 or i + 1 >= lines.items.len) continue;
+        if (lineIndent(line.text) >= 4) continue; // indented code stays intact
+        if (!lineContainsPipe(line.text)) continue;
+        if (!lineIsTableDelimiter(lines.items[i + 1].text)) continue;
+        const prev = lines.items[i - 1].text;
+        if (lineIsBlank(prev) or lineContainsPipe(prev)) continue;
+        try starts.append(alloc, line.start);
+    }
+    if (starts.items.len == 0) return source;
+    var buf: std.ArrayList(u8) = .empty;
+    var cur: usize = 0;
+    for (starts.items) |start| {
+        try buf.appendSlice(alloc, source[cur..start]);
+        try buf.append(alloc, '\n');
+        cur = start;
+    }
+    try buf.appendSlice(alloc, source[cur..]);
+    return try buf.toOwnedSlice(alloc);
 }
 
 // ---------------------------------------------------------------- footnotes
@@ -865,6 +965,33 @@ test "markdown renders the Fibonacci table as a real table" {
     try std.testing.expect(std.mem.indexOf(u8, out, "<tbody") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Katsayi") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "| Katsayi |") == null);
+}
+
+test "markdown renders a table that directly follows a list without a blank line" {
+    const alloc = std.testing.allocator;
+    const out = try renderToString(alloc, "- first item\n- second item\n| A | B |\n| --- | --- |\n| 1 | 2 |\n");
+    defer alloc.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "<table") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "<tbody") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "| A |") == null);
+    // A table directly after a paragraph, inside fenced code, and inside
+    // indented code: the first must render, the other two stay literal.
+    const para = try renderToString(alloc, "Some intro text\n| A | B |\n| --- | --- |\n| 1 | 2 |\n");
+    defer alloc.free(para);
+    try std.testing.expect(std.mem.indexOf(u8, para, "<table") != null);
+    const fenced = try renderToString(alloc, "```\n| A | B |\n| --- | --- |\n| 1 | 2 |\n```\n");
+    defer alloc.free(fenced);
+    try std.testing.expect(std.mem.indexOf(u8, fenced, "<table") == null);
+    try std.testing.expect(std.mem.indexOf(u8, fenced, "| A |") != null);
+    const indented = try renderToString(alloc, "    | A | B |\n    | --- | --- |\n    | 1 | 2 |\n");
+    defer alloc.free(indented);
+    try std.testing.expect(std.mem.indexOf(u8, indented, "<table") == null);
+    // A pipe line that is not a table start is untouched, and setext
+    // headings (no pipe in the underline) are not misread as delimiters.
+    const plain = try renderToString(alloc, "a | b is not a table\n\nTitle\n---\n");
+    defer alloc.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "<table") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "<h2") != null);
 }
 
 test "markdown renders GFM task lists, tables, and footnotes" {

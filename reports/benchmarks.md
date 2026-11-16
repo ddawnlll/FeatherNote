@@ -1,5 +1,33 @@
 # FeatherNote benchmark report
 
+## Re-measurement after the block editor (2026-11-12, Issue #3)
+
+Same command and machine. `scripts/bench.py` now also measures the blocks
+page (`GET /notes/{id}/blocks`) and server-side preview
+(`POST /notes/{id}/preview`). The only intended change is the block
+editor (preview endpoints, blocks page, editor CSS).
+
+| Metric | Renderer build (Issue #2) | After (2026-11-12) | Delta |
+|---|---:|---:|---:|
+| Binary | 2,813,720 B | 2,908,312 B | +94,592 B (+3.4%) |
+| Idle RSS, 100 notes | 6,972 KiB | 7,920 KiB | +948 KiB |
+| Idle RSS, 10k notes | 7,152 KiB | 8,372 KiB | +1,220 KiB |
+| HWM, 100 notes | 24,224 KiB | 24,248 KiB | +24 KiB |
+| GET note p95, 100 notes | 3.87 ms | 3.78 ms | run variance |
+| Blocks page p50/p95, 100 notes | n/a | 1.99 / 2.69 ms | new, 200 requests |
+| Blocks page p50/p95, 10k notes | n/a | 2.04 / 3.53 ms | new, 200 requests |
+| Preview p50/p95, 100 notes | n/a | 2.42 / 5.45 ms | new, 200 requests, renders a 1 KiB draft, writes nothing |
+| Preview p50/p95, 10k notes | n/a | 2.54 / 5.60 ms | new, 200 requests |
+| CSS | 24,616 B | 25,900 B | +1,284 B (block/preview/cell-grid styles) |
+| JS served | 0 B | 0 B | 0 |
+
+All targets still pass with large margins. The block editor costs about
+95 KB binary and roughly 1 MiB idle RSS; the blocks page and preview are
+in the same latency class as the read view. Raw run output is the JSON
+printed by `scripts/bench.py` on 2026-11-12.
+
+---
+
 ## Re-measurement after the MD4C renderer (2026-11-12, Issue #2)
 
 Same command and machine. The only intended change is the renderer

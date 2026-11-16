@@ -44,18 +44,37 @@ notes stay in a sidebar on desktop.
 
 ### Write in Markdown
 
-The editor is a plain textarea plus a cheatsheet. Headings, emphasis, lists,
+The source editor is a plain textarea plus a cheatsheet. Headings, emphasis, lists,
 quotes, fenced and indented code, links, images, tables, task lists,
 strikethrough, footnotes, and autolinks are rendered on the server by MD4C
 (CommonMark + GFM). A safe subset of raw HTML is rendered after allowlist
 sanitization; active content such as scripts, event handlers, iframes, and
-dangerous URLs is never executed.
+dangerous URLs is never executed. The Preview draft button renders your
+current, unsaved text on the server and saves nothing.
 
 ![A Fibonacci call table rendered as a real HTML table](docs/screenshots/fibonacci-table.png)
 
 ![The same table in the Midnight theme](docs/screenshots/fibonacci-table-dark.png)
 
 ![Editing a Markdown note](docs/screenshots/note-editor.png)
+
+### Edit in blocks (no JavaScript)
+
+The Blocks tab edits the same Markdown one block at a time: paragraphs,
+headings, lists, checklists, quotes, code, tables (with a cell grid),
+links, and images each get their own form, plus insert, move, duplicate,
+convert, and confirmed delete. Unchanged blocks keep their exact bytes, so
+this is not a lossy round-trip; constructs the block editor cannot
+regenerate safely (nested lists, footnote definitions, HTML blocks) stay
+editable as verbatim Markdown, and the source editor is always one tab
+away. There is no live cursor tracking and no drag-and-drop: every action
+is a plain form submission that lands back on the block you changed.
+
+![Block editor with rendered previews, per-block forms, and a table cell grid](docs/screenshots/editor/blocks-desktop-light.png)
+
+![Block editor in the Midnight theme](docs/screenshots/editor/blocks-desktop-dark.png)
+
+![Block editor on a phone](docs/screenshots/editor/blocks-mobile.png)
 
 ### Attach images and files
 
@@ -104,7 +123,8 @@ the password, a local operator resets it and revokes every session.
 ### Starting a new note
 
 The composer is a title and a Markdown text box. Save once before attaching
-files. No toolbar, no block editor, no autosave race.
+files. No toolbar, no autosave race; the optional Blocks tab is the
+server-driven rich editor described above.
 
 ![New note form](docs/screenshots/new-note.png)
 
