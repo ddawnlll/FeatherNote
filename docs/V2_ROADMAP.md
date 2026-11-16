@@ -120,7 +120,7 @@ FeatherNote stays a **self-hosted, single-owner, Markdown-canonical notebook**: 
 - [ ] **F51** 320px-to-desktop responsive index, reader, editor, history, diff, search and files
 - [x] **F52** Distraction-free Focus Reading Mode with semantic accessible prose
 - [ ] **F53** Compact desktop sidebar and native mobile navigation without JavaScript
-- [ ] **F54** Subtle progressive CSS page transitions; reduced-motion respected everywhere
+- [x] **F54** Subtle progressive CSS page transitions; reduced-motion respected everywhere
 - [x] **F55** Print-friendly stylesheet and browser-native PDF output
 - [ ] **F56** Turkish/English strings and explicit timezone/date/number formatting
 - [ ] **F57** Keyboard/screen-reader and WCAG-oriented audit across all 12 themes

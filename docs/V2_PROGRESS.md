@@ -23,12 +23,13 @@ itself; checks below name the test that proves the claim.
 | Focus reading and print output (F52, F55) | `GET /notes/{id}/focus` renders semantic prose without site chrome in the same CSP; `@media print` hides controls and prints external link targets; integration checks assert no scripts and the print rules. |
 | Explicit retention and verified purge (F12) | `admin purge-history --keep-last N [--older-than-days D] [--apply]`; dry-run by default; keeps newest N, all labels and young revisions; records per-note floors; verifies labels, heads, chains, assets and integrity before commit; history reports the floor. |
 | Per-session inventory and revocation (F64) | Settings lists active sessions with times and fingerprints; CSRF-protected selective revoke and revoke-all-other routes reject the current session; revoked browsers redirect to login; unit and HTTP tests. |
+| CSS page transitions (F54) | Cross-document View Transitions keep the header fixed and animate the named page content; a page-load fallback covers browsers without the property; reduced-motion disables all animation. |
 
 ## Measured evidence (this iteration)
 
 - `zig build test`: pass (including revision lifecycle, no-op, conflict,
   restore, attachment manifest, v3→v4 baseline migration, bounded diff).
-- `python3 tests/integration.py`: 210 passed, 0 failed.
+- `python3 tests/integration.py`: 211 passed, 0 failed.
 - `python3 tests/mcp_test.py`: 55 passed, 0 failed.
 - Retention: dry run reports the plan without committing; apply matches the
   plan; labelled checkpoint blocks a later `--keep-last 1`; doctor passes with

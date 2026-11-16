@@ -280,6 +280,10 @@ def main():
         check("print stylesheet hides chrome and prints link targets",
               status == 200 and b"@media print" in css and b".focus-bar" in css
               and b'attr(href)' in css)
+        check("page transitions are CSS-only and reduced-motion aware",
+              b"@view-transition" in css
+              and b"view-transition-name: page-content" in css
+              and b"prefers-reduced-motion: reduce" in css)
 
         status, _, body = c.get("/notes")
         check("list includes escaped title", b"Gr&uuml;" not in body and b"&lt;script&gt;" in body)
