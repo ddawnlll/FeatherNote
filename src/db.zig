@@ -173,6 +173,7 @@ pub const Db = struct {
     mutex: Io.Mutex = .init,
     io: Io,
     allocator: Allocator,
+    read_only: bool = false,
 
     pub fn open(allocator: Allocator, io: Io, path: []const u8) DbError!*Db {
         const path_z = allocator.dupeSentinel(u8, path, 0) catch return DbError.OpenFailed;
@@ -205,8 +206,33 @@ pub const Db = struct {
 
     pub fn close(self: *Db, allocator: Allocator) void {
         defer allocator.destroy(self);
-        _ = self.execRaw("PRAGMA wal_checkpoint(TRUNCATE);") catch {};
+        if (!self.read_only) _ = self.execRaw("PRAGMA wal_checkpoint(TRUNCATE);") catch {};
         _ = c.sqlite3_close(self.handle);
+    }
+
+    /// Read-only open for doctor/verification. Never migrates or writes.
+    pub fn openReadOnly(allocator: Allocator, io: Io, path: []const u8) DbError!*Db {
+        const path_z = allocator.dupeSentinel(u8, path, 0) catch return DbError.OpenFailed;
+        defer allocator.free(path_z);
+
+        var handle_opt: ?*c.sqlite3 = null;
+        const flags = c.SQLITE_OPEN_READONLY | c.SQLITE_OPEN_FULLMUTEX;
+        if (c.sqlite3_open_v2(path_z.ptr, &handle_opt, flags, null) != c.SQLITE_OK) {
+            if (handle_opt) |h| _ = c.sqlite3_close(h);
+            return DbError.OpenFailed;
+        }
+        const handle = handle_opt orelse return DbError.OpenFailed;
+        errdefer _ = c.sqlite3_close(handle);
+        _ = c.sqlite3_extended_result_codes(handle, 1);
+        _ = c.sqlite3_busy_timeout(handle, 5000);
+
+        const self = allocator.create(Db) catch return DbError.OpenFailed;
+        errdefer allocator.destroy(self);
+        self.* = .{ .handle = handle, .io = io, .allocator = allocator, .read_only = true };
+        try self.execRaw("PRAGMA query_only=ON;");
+        try self.execRaw("PRAGMA foreign_keys=ON;");
+        try self.execRaw("PRAGMA trusted_schema=OFF;");
+        return self;
     }
 
     pub fn version(self: *Db) []const u8 {
@@ -1383,6 +1409,116 @@ pub const Db = struct {
         return c.sqlite3_column_int64(stmt.handle, 0);
     }
 
+    fn scalarLocked(self: *Db, sql: [:0]const u8) !i64 {
+        var stmt = try self.prepare(sql);
+        defer stmt.deinit();
+        if (try stmt.step() != c.SQLITE_ROW) return error.Sqlite;
+        return c.sqlite3_column_int64(stmt.handle, 0);
+    }
+
+    /// Read-only whole-database verification. Returns false if any check fails;
+    /// the writer receives one PASS/FAIL line per invariant.
+    pub fn diagnose(self: *Db, writer: *std.Io.Writer) !bool {
+        try self.mutex.lock(self.io);
+        defer self.mutex.unlock(self.io);
+        var ok = true;
+
+        try writer.writeAll("FeatherNote database doctor\n");
+        const schema_version = try self.schemaVersion();
+        try writer.print("schema version: {d}\n", .{schema_version});
+        try reportCheck(writer, &ok, schema_version >= 1 and schema_version <= 5, "schema version is supported");
+
+        var integrity = try self.prepare("PRAGMA integrity_check");
+        const integrity_ok = blk: {
+            defer integrity.deinit();
+            if (try integrity.step() != c.SQLITE_ROW) break :blk false;
+            const text = c.sqlite3_column_text(integrity.handle, 0);
+            break :blk text != null and std.mem.eql(u8, std.mem.span(text), "ok");
+        };
+        try reportCheck(writer, &ok, integrity_ok, "SQLite integrity_check");
+
+        var foreign_keys = try self.prepare("PRAGMA foreign_key_check");
+        const fk_ok = blk: {
+            defer foreign_keys.deinit();
+            break :blk (try foreign_keys.step()) != c.SQLITE_ROW;
+        };
+        try reportCheck(writer, &ok, fk_ok, "foreign_key_check has no violations");
+
+        const notes = try self.scalarLocked("SELECT COUNT(*) FROM notes");
+        const fts_rows = try self.scalarLocked("SELECT COUNT(*) FROM notes_fts");
+        try writer.print("notes: {d}, fts rows: {d}\n", .{ notes, fts_rows });
+        try reportCheck(writer, &ok, notes == fts_rows, "FTS row count matches notes");
+
+        const missing_history = try self.scalarLocked(
+            "SELECT COUNT(*) FROM notes n WHERE NOT EXISTS (SELECT 1 FROM note_revisions r WHERE r.note_id = n.id)",
+        );
+        try writer.print("notes without revisions: {d}\n", .{missing_history});
+        try reportCheck(writer, &ok, missing_history == 0, "every note has a revision chain");
+
+        const broken_chains = try self.scalarLocked(
+            \\SELECT COUNT(*) FROM (
+            \\  SELECT note_id FROM note_revisions GROUP BY note_id
+            \\  HAVING MIN(revision_no) <> 1 OR MAX(revision_no) <> COUNT(*) OR COUNT(*) <> MAX(revision_no)
+            \\)
+        );
+        try writer.print("broken revision chains: {d}\n", .{broken_chains});
+        try reportCheck(writer, &ok, broken_chains == 0, "revision numbers are contiguous from 1");
+
+        var checksum_stmt = try self.prepare("SELECT title, body, checksum FROM note_revisions");
+        var checksum_mismatches: i64 = 0;
+        {
+            defer checksum_stmt.deinit();
+            while (try checksum_stmt.step() == c.SQLITE_ROW) {
+                const title = try self.columnText(&checksum_stmt, 0, self.allocator);
+                defer self.allocator.free(title);
+                const body = try self.columnText(&checksum_stmt, 1, self.allocator);
+                defer self.allocator.free(body);
+                const stored = try self.columnText(&checksum_stmt, 2, self.allocator);
+                defer self.allocator.free(stored);
+                const computed = try noteChecksum(self.allocator, title, body);
+                defer self.allocator.free(computed);
+                if (!std.mem.eql(u8, stored, computed)) checksum_mismatches += 1;
+            }
+        }
+        try writer.print("revision checksum mismatches: {d}\n", .{checksum_mismatches});
+        try reportCheck(writer, &ok, checksum_mismatches == 0, "revision checksums match content");
+
+        const head_mismatches = try self.scalarLocked(
+            \\SELECT COUNT(*) FROM notes n JOIN (
+            \\  SELECT r.* FROM note_revisions r JOIN (
+            \\    SELECT note_id, MAX(revision_no) AS m FROM note_revisions GROUP BY note_id
+            \\  ) x ON x.note_id = r.note_id AND x.m = r.revision_no
+            \\) h ON h.note_id = n.id
+            \\WHERE n.title <> h.title OR n.body <> h.body OR n.version <> h.note_version
+            \\   OR n.is_pinned <> h.is_pinned OR n.deleted_at IS NOT h.deleted_at
+        );
+        try writer.print("current-state/head mismatches: {d}\n", .{head_mismatches});
+        try reportCheck(writer, &ok, head_mismatches == 0, "current notes match their head revisions");
+
+        const orphan_assets = try self.scalarLocked(
+            "SELECT COUNT(*) FROM revision_assets a LEFT JOIN attachments t ON t.id = a.attachment_id WHERE t.id IS NULL",
+        );
+        try writer.print("revision assets without attachment bytes: {d}\n", .{orphan_assets});
+        try reportCheck(writer, &ok, orphan_assets == 0, "revision asset manifests resolve");
+
+        const orphan_attachments = try self.scalarLocked(
+            "SELECT COUNT(*) FROM attachments a LEFT JOIN notes n ON n.id = a.note_id WHERE n.id IS NULL",
+        );
+        try writer.print("attachments without notes: {d}\n", .{orphan_attachments});
+        try reportCheck(writer, &ok, orphan_attachments == 0, "attachments belong to existing notes");
+
+        const bad_blobs = try self.scalarLocked(
+            "SELECT COUNT(*) FROM attachments WHERE size <> length(data) OR length(sha256) <> 64",
+        );
+        try writer.print("attachments with size/hash shape mismatch: {d}\n", .{bad_blobs});
+        try reportCheck(writer, &ok, bad_blobs == 0, "attachment size and hash shape");
+
+        const bad_labels = try self.scalarLocked("SELECT COUNT(*) FROM note_revisions WHERE length(label) > 80");
+        try reportCheck(writer, &ok, bad_labels == 0, "checkpoint labels are within bounds");
+
+        return ok;
+    }
+
     pub fn integrityCheck(self: *Db) !bool {
         try self.mutex.lock(self.io);
         defer self.mutex.unlock(self.io);
@@ -1416,6 +1552,11 @@ fn noteChecksum(allocator: Allocator, title: []const u8, body: []const u8) ![]u8
     hasher.final(&digest);
     const hex = std.fmt.bytesToHex(digest, .lower);
     return allocator.dupe(u8, &hex);
+}
+
+fn reportCheck(writer: *std.Io.Writer, ok: *bool, passed: bool, label: []const u8) !void {
+    if (!passed) ok.* = false;
+    try writer.print("{s} {s}\n", .{ if (passed) "PASS" else "FAIL", label });
 }
 
 fn makeFtsQuery(allocator: Allocator, q: []const u8) !?[]u8 {
@@ -1617,6 +1758,38 @@ test "v4 migration seeds one baseline revision without fabricating history" {
     try testing.expectEqual(Origin.system, baseline.origin);
     try testing.expectEqualStrings("old body", baseline.body);
     try testing.expectEqual(@as(i64, 2000), baseline.created_at);
+}
+
+test "database doctor accepts healthy history and rejects a bad checksum" {
+    const testing = std.testing;
+    const io = testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try std.fs.path.join(testing.allocator, &.{ ".zig-cache/tmp", &tmp.sub_path, "doctor.db" });
+    defer testing.allocator.free(db_path);
+
+    const database = try Db.open(testing.allocator, io, db_path);
+    defer database.close(testing.allocator);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const id = try database.createNoteFrom(arena, "Doctor note", "body", 3000, .web);
+    _ = try database.updateNoteFrom(id, 1, "Doctor note v2", "body two", 3001, .mcp);
+    _ = try database.setRevisionLabel(id, 2, "checkpoint");
+
+    var healthy = std.Io.Writer.Allocating.init(testing.allocator);
+    defer healthy.deinit();
+    try testing.expect(try database.diagnose(&healthy.writer));
+    try testing.expect(std.mem.find(u8, healthy.written(), "PASS revision checksums match content") != null);
+
+    try database.execRaw(
+        "UPDATE note_revisions SET checksum = '0000000000000000000000000000000000000000000000000000000000000000'",
+    );
+    var broken = std.Io.Writer.Allocating.init(testing.allocator);
+    defer broken.deinit();
+    try testing.expect(!try database.diagnose(&broken.writer));
+    try testing.expect(std.mem.find(u8, broken.written(), "FAIL revision checksums match content") != null);
 }
 
 test "sessions and owner" {

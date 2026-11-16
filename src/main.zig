@@ -107,6 +107,10 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, sub, "integrity")) {
             const cfg = parseConfig(init.environ_map.*, &it);
             try adminIntegrity(gpa, io, cfg.db_path);
+        } else if (std.mem.eql(u8, sub, "doctor")) {
+            const cfg = parseConfig(init.environ_map.*, &it);
+            const ok = try adminDoctor(gpa, io, cfg.db_path);
+            if (!ok) std.process.exit(1);
         } else {
             std.debug.print("unknown admin command: {s}\n", .{sub});
             std.process.exit(2);
@@ -129,6 +133,7 @@ fn printUsage() void {
         \\  feathernote admin set-password [--db PATH]   (reads one line from stdin)
         \\  feathernote admin backup [--db PATH] --out PATH
         \\  feathernote admin integrity [--db PATH]
+        \\  feathernote admin doctor [--db PATH]
         \\
     , .{});
 }
@@ -1755,6 +1760,22 @@ fn adminIntegrity(gpa: Allocator, io: Io, db_path: []const u8) !void {
         std.debug.print("integrity_check: FAILED\n", .{});
         return error.IntegrityCheckFailed;
     }
+}
+
+fn adminDoctor(gpa: Allocator, io: Io, db_path: []const u8) !bool {
+    const database = db.Db.openReadOnly(gpa, io, db_path) catch |err| {
+        std.debug.print("cannot open database read-only: {t}\n", .{err});
+        return false;
+    };
+    defer database.close(gpa);
+    var aw = std.Io.Writer.Allocating.init(gpa);
+    defer aw.deinit();
+    const ok = database.diagnose(&aw.writer) catch |err| {
+        std.debug.print("doctor failed: {t}\n", .{err});
+        return false;
+    };
+    std.debug.print("{s}", .{aw.written()});
+    return ok;
 }
 
 test {

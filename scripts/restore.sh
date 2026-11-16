@@ -19,8 +19,8 @@ if [ -e "$TARGET" ]; then
     exit 1
 fi
 
-echo "Verifying backup integrity..."
-"$BIN" admin integrity --db "$SRC"
+echo "Verifying backup integrity, revisions and asset references..."
+"$BIN" admin doctor --db "$SRC"
 
 DIR="$(dirname "$TARGET")"
 mkdir -p "$DIR"
@@ -33,6 +33,6 @@ mv "$TMP" "$TARGET"
 # Stale WAL/SHM sidecars from an old database must not be reused.
 rm -f "$TARGET-wal" "$TARGET-shm"
 
-"$BIN" admin integrity --db "$TARGET"
+"$BIN" admin doctor --db "$TARGET"
 echo "Restored $TARGET. Start FeatherNote only after the service was stopped."
 echo "Remember to verify a note in the browser after startup."

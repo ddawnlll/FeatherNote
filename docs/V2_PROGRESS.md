@@ -9,7 +9,7 @@ itself; checks below name the test that proves the claim.
 
 | Work | Evidence |
 |---|---|
-| Renderer PR #4 (F13, F14) | Merged to `master`; `zig build test`, 177 HTTP checks, 55 MCP checks; vendored MD4C checksums verified; XSS fixtures escaped. |
+| Renderer PR #4 (F13, F14) | Merged to `master`; `zig build test`, 178 HTTP checks, 55 MCP checks; vendored MD4C checksums verified; XSS fixtures escaped. |
 | Zero-JS block editor PR #5 (F15–F18) | Merged after retargeting to `master`; preview/draft/conflict tests green. |
 | Roadmap PR #15 | Merged; 80 feature IDs and release gates are now on `master`. |
 | Revision engine foundation (F01, F02 read model, F04, F05, F07, F09, F11 source, F12 default) | `migrations/0004_revisions.sql`, one transactional writer for Web and MCP, migration baseline test, no-op/conflict tests. |
@@ -19,12 +19,13 @@ itself; checks below name the test that proves the claim.
 | Three-way conflicts (F10) | 409 page shows the exact base revision, base→latest diff and base→draft diff with the draft preserved; no automatic merge. |
 | Historical export (F11) | Exact Markdown download plus JSON title/checksum/asset manifest per revision; safe attachment filename; GET-only. |
 | Named checkpoints (F06) | 80-character labels on any revision; CSRF web form and MCP `set_revision_label`; labels excluded from checksums and no pruning job exists. |
+| Read-only doctor and verified backups (F59/F62 partial) | `admin doctor` checks integrity, FKs, FTS parity, revision chains/checksums, head agreement, asset manifests, attachment ownership and labels; backup/restore scripts run it. |
 
 ## Measured evidence (this iteration)
 
 - `zig build test`: pass (including revision lifecycle, no-op, conflict,
   restore, attachment manifest, v3→v4 baseline migration, bounded diff).
-- `python3 tests/integration.py`: 177 passed, 0 failed.
+- `python3 tests/integration.py`: 178 passed, 0 failed.
 - `python3 tests/mcp_test.py`: 55 passed, 0 failed.
 - Zero client JavaScript: history and diff pages are server-rendered forms and
   escaped HTML; integration checks assert no `<script>` in revision/compare

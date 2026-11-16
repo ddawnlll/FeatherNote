@@ -12,6 +12,7 @@ mkdir -p "$DIR/daily" "$DIR/weekly"
 OUT="$DIR/daily/feathernote-$STAMP.db"
 "$BIN" admin backup --db "$DB" --out "$OUT"
 chmod 600 "$OUT"
+"$BIN" admin doctor --db "$OUT"
 
 # Weekly copy on Sundays (UTC).
 if [ "$(date -u +%u)" = "7" ]; then
