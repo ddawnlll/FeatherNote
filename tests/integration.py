@@ -8,6 +8,7 @@ Usage: python3 tests/integration.py [--binary zig-out/bin/feathernote]
 """
 import argparse
 import http.client
+import json
 import os
 import re
 import shutil
@@ -412,6 +413,26 @@ def main():
         check("revision detail keeps exact old Markdown",
               status == 200 and b"alpha\nbeta" in old_rev and b"Checksum" in old_rev)
         check("revision detail has no scripts", b"<script" not in old_rev)
+        status, headers, downloaded = c.get(rev_url + "/history/1/download")
+        check("revision download returns exact Markdown bytes",
+              status == 200 and downloaded == b"alpha\nbeta", status)
+        check("revision download is an attachment",
+              headers.get("content-type", "").startswith("text/markdown")
+              and headers.get("content-disposition", "").startswith("attachment;")
+              and ".md" in headers.get("content-disposition", ""))
+        status, headers, manifest_body = c.get(rev_url + "/history/1/manifest")
+        manifest = json.loads(manifest_body) if status == 200 else {}
+        check("revision manifest is JSON with no assets",
+              status == 200 and manifest.get("revision") == 1
+              and manifest.get("assets") == []
+              and manifest.get("checksum"))
+        check("revision manifest is an attachment",
+              headers.get("content-type", "").startswith("application/json")
+              and headers.get("content-disposition", "").startswith("attachment;"))
+        status, _, _ = c.get(rev_url + "/history/999/download")
+        check("unknown revision download is 404", status == 404, status)
+        status, _, _ = c.form(rev_url + "/history/1/download", {}, csrf=csrf_of(rev_history))
+        check("revision download rejects POST", status == 405, status)
         status, _, compared = c.get(rev_url + "/compare?from=1&to=2")
         check("compare renders added and removed lines",
               status == 200 and b"diff-line removed" in compared and b"diff-line added" in compared
@@ -571,6 +592,10 @@ def main():
                 status, _, historical = c.get(file_path + f"?revision={revision_no}")
                 check("deleted file remains readable from its revision",
                       status == 200 and historical.startswith(b"\x89PNG"), status)
+                status, _, asset_manifest = c.get(note_url + f"/history/{revision_no}/manifest")
+                parsed_manifest = json.loads(asset_manifest) if status == 200 else {}
+                check("revision manifest lists the historical attachment",
+                      any(a.get("filename") == "pixel.png" for a in parsed_manifest.get("assets", [])))
                 status, _, _ = c.get(file_path + "?revision=999")
                 check("unreferenced deleted file stays hidden", status == 404, status)
                 status, _, revision_page = c.get(note_url + f"/history/{revision_no}")

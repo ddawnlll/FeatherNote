@@ -1099,6 +1099,10 @@ pub fn revisionDetail(w: *Writer, ctx: Ctx, args: RevisionArgs) !void {
     }
 
     try w.writeAll("<div class=\"revision-actions\"><a class=\"button secondary\" href=\"/notes/");
+    try w.print("{d}/history/{d}/download\"", .{ args.note.id, args.revision.revision_no });
+    try w.writeAll(">Download Markdown</a><a class=\"button secondary\" href=\"/notes/");
+    try w.print("{d}/history/{d}/manifest\"", .{ args.note.id, args.revision.revision_no });
+    try w.writeAll(">Download manifest</a><a class=\"button secondary\" href=\"/notes/");
     try w.print("{d}/compare?from={d}&amp;to={d}\"", .{ args.note.id, args.revision.revision_no, args.head_revision });
     try w.writeAll(">Compare with current</a><form method=\"post\" action=\"/notes/");
     try w.print("{d}/restore/{d}\"", .{ args.note.id, args.revision.revision_no });

@@ -653,13 +653,22 @@ fn dispatch(
             if (method != .POST) return methodNotAllowed(arena, ctx, "POST");
             return handleBlocksOp(app, request, arena, ctx, id, op, content_type);
         } else if (std.mem.eql(u8, act, "history")) {
-            if (final_action != null) return notFound(arena, ctx);
             if (!isReadMethod(method)) return methodNotAllowed(arena, ctx, "GET, HEAD");
             if (sub_action) |rev_text| {
                 const revision_no = std.fmt.parseInt(i64, rev_text, 10) catch return notFound(arena, ctx);
                 if (revision_no < 1) return notFound(arena, ctx);
+                if (final_action) |artifact| {
+                    if (std.mem.eql(u8, artifact, "download")) {
+                        return handleRevisionDownload(app, arena, ctx, id, revision_no);
+                    }
+                    if (std.mem.eql(u8, artifact, "manifest")) {
+                        return handleRevisionManifest(app, arena, ctx, id, revision_no);
+                    }
+                    return notFound(arena, ctx);
+                }
                 return handleRevision(app, arena, ctx, id, revision_no);
             }
+            if (final_action != null) return notFound(arena, ctx);
             return handleHistory(app, arena, ctx, id, query.page);
         } else if (std.mem.eql(u8, act, "compare")) {
             if (sub_action != null or final_action != null) return notFound(arena, ctx);
@@ -1530,6 +1539,71 @@ fn handleRevision(app: *App, arena: Allocator, ctx: views.Ctx, id: i64, revision
         .head_revision = head,
     });
     return .{ .status = .ok, .body = aw.written() };
+}
+
+fn revisionFilename(arena: Allocator, title: []const u8, suffix: []const u8) ![]const u8 {
+    const raw = if (title.len == 0) "untitled" else title;
+    const safe = try media.sanitizeFilename(arena, raw);
+    const ascii = try media.asciiFilename(arena, safe);
+    return std.fmt.allocPrint(arena, "{s}{s}", .{ ascii, suffix });
+}
+
+fn handleRevisionDownload(app: *App, arena: Allocator, ctx: views.Ctx, id: i64, revision_no: i64) !Response {
+    const revision = (try app.database.getRevision(arena, id, revision_no)) orelse return notFound(arena, ctx);
+    const filename = try revisionFilename(arena, revision.title, ".md");
+    const disposition = try std.fmt.allocPrint(arena, "attachment; filename=\"{s}\"", .{filename});
+    return .{
+        .status = .ok,
+        .body = revision.body,
+        .content_type = "text/markdown; charset=utf-8",
+        .disposition = disposition,
+    };
+}
+
+fn handleRevisionManifest(app: *App, arena: Allocator, ctx: views.Ctx, id: i64, revision_no: i64) !Response {
+    const revision = (try app.database.getRevision(arena, id, revision_no)) orelse return notFound(arena, ctx);
+    const manifest_assets = try app.database.revisionAssets(arena, id, revision_no);
+    var aw = std.Io.Writer.Allocating.init(arena);
+    var jw = std.json.Stringify{ .writer = &aw.writer };
+    try jw.beginObject();
+    try jw.objectField("note_id");
+    try jw.write(id);
+    try jw.objectField("revision");
+    try jw.write(revision.revision_no);
+    try jw.objectField("note_version");
+    try jw.write(revision.note_version);
+    try jw.objectField("title");
+    try jw.write(revision.title);
+    try jw.objectField("checksum");
+    try jw.write(revision.checksum);
+    try jw.objectField("created_at");
+    try jw.write(revision.created_at);
+    try jw.objectField("assets");
+    try jw.beginArray();
+    for (manifest_assets) |asset| {
+        try jw.beginObject();
+        try jw.objectField("attachment_id");
+        try jw.write(asset.attachment_id);
+        try jw.objectField("filename");
+        try jw.write(asset.filename);
+        try jw.objectField("mime");
+        try jw.write(asset.mime);
+        try jw.objectField("size");
+        try jw.write(asset.size);
+        try jw.objectField("sha256");
+        try jw.write(asset.sha256);
+        try jw.endObject();
+    }
+    try jw.endArray();
+    try jw.endObject();
+    const filename = try revisionFilename(arena, revision.title, ".manifest.json");
+    const disposition = try std.fmt.allocPrint(arena, "attachment; filename=\"{s}\"", .{filename});
+    return .{
+        .status = .ok,
+        .body = aw.written(),
+        .content_type = "application/json; charset=utf-8",
+        .disposition = disposition,
+    };
 }
 
 fn handleCompare(app: *App, arena: Allocator, ctx: views.Ctx, id: i64, query: Query) !Response {
