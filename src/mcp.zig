@@ -233,6 +233,16 @@ const tools = [_]Tool{
         .idempotent = false,
     },
     .{
+        .name = "set_revision_label",
+        .title = "Label revision",
+        .description = "Set or clear a checkpoint label on an immutable revision. Labels are annotations, not new revisions.",
+        .schema =
+        \\{"type":"object","properties":{"id":{"type":"integer","minimum":1},"revision":{"type":"integer","minimum":1},"label":{"type":"string","maxLength":80}},"required":["id","revision","label"],"additionalProperties":false}
+        ,
+        .write = true,
+        .idempotent = true,
+    },
+    .{
         .name = "attach_file",
         .title = "Attach file",
         .description = "Attach a base64 file up to 8 MiB, store it in SQLite, and append its Markdown link to the note. Requires the current note version.",
@@ -493,6 +503,7 @@ fn dispatchTool(app: *App, arena: Allocator, name: []const u8, args: Object) !To
     if (std.mem.eql(u8, name, "delete_note")) return toolDeleteNote(app, arena, args);
     if (std.mem.eql(u8, name, "restore_note")) return toolRestoreNote(app, arena, args);
     if (std.mem.eql(u8, name, "restore_revision")) return toolRestoreRevision(app, arena, args);
+    if (std.mem.eql(u8, name, "set_revision_label")) return toolSetRevisionLabel(app, arena, args);
     if (std.mem.eql(u8, name, "attach_file")) return toolAttachFile(app, arena, args);
     if (std.mem.eql(u8, name, "delete_attachment")) return toolDeleteAttachment(app, arena, args);
     if (std.mem.eql(u8, name, "set_theme")) return toolSetTheme(app, arena, args);
@@ -753,6 +764,8 @@ fn toolListRevisions(app: *App, arena: Allocator, args: Object) !ToolResult {
         try jw.write(row.title);
         try jw.objectField("checksum");
         try jw.write(row.checksum);
+        try jw.objectField("label");
+        try jw.write(row.label);
         try jw.endObject();
     }
     try jw.endArray();
@@ -936,6 +949,36 @@ fn toolRestoreRevision(app: *App, arena: Allocator, args: Object) !ToolResult {
         .deleted => conflictResult(app, arena, id, "The note is in Trash."),
         .not_found => .{ .payload = try errorPayload(arena, "not_found", "No note with that id."), .is_error = true },
     };
+}
+
+fn toolSetRevisionLabel(app: *App, arena: Allocator, args: Object) !ToolResult {
+    const id = try reqInt(args, "id");
+    const revision_no = try reqInt(args, "revision");
+    const raw_label = try reqString(args, "label");
+    if (id < 1 or revision_no < 1) return error.InvalidArguments;
+    const label = std.mem.trim(u8, raw_label, " ");
+    if (label.len > 80 or !std.unicode.utf8ValidateSlice(label)) {
+        return .{ .payload = try errorPayload(arena, "invalid_label", "Labels are limited to 80 UTF-8 characters."), .is_error = true };
+    }
+    for (label) |ch| {
+        if (ch < 0x20 or ch == 0x7f) {
+            return .{ .payload = try errorPayload(arena, "invalid_label", "Labels cannot contain control characters."), .is_error = true };
+        }
+    }
+    if (!try app.database.setRevisionLabel(id, revision_no, label)) {
+        return .{ .payload = try errorPayload(arena, "not_found", "No revision with that number for this note."), .is_error = true };
+    }
+    var aw = Writer.Allocating.init(arena);
+    var jw = std.json.Stringify{ .writer = &aw.writer };
+    try jw.beginObject();
+    try jw.objectField("id");
+    try jw.write(id);
+    try jw.objectField("revision");
+    try jw.write(revision_no);
+    try jw.objectField("label");
+    try jw.write(label);
+    try jw.endObject();
+    return .{ .payload = aw.written() };
 }
 
 fn toolAttachFile(app: *App, arena: Allocator, args: Object) !ToolResult {
@@ -1255,6 +1298,8 @@ fn writeRevisionJson(jw: *std.json.Stringify, revision: db.Revision) !void {
     try jw.write(revision.summary);
     try jw.objectField("checksum");
     try jw.write(revision.checksum);
+    try jw.objectField("label");
+    try jw.write(revision.label);
     try jw.endObject();
 }
 

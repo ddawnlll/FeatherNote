@@ -1018,6 +1018,11 @@ pub fn history(w: *Writer, ctx: Ctx, args: HistoryArgs) !void {
                 try util.escapeHtml(w, row.summary);
                 try w.writeAll("</span>");
             }
+            if (row.label.len > 0) {
+                try w.writeAll(" <span class=\"checkpoint\">Checkpoint: ");
+                try util.escapeHtml(w, row.label);
+                try w.writeAll("</span>");
+            }
             try w.writeAll("</td><td>");
             try util.escapeHtml(w, originLabel(row.origin));
             try w.writeAll("</td><td class=\"snapshot-title\">");
@@ -1071,7 +1076,19 @@ pub fn revisionDetail(w: *Writer, ctx: Ctx, args: RevisionArgs) !void {
     try util.escapeHtml(w, originLabel(args.revision.origin));
     try w.writeAll("</dd><dt>Checksum</dt><dd><code>");
     try util.escapeHtml(w, args.revision.checksum);
-    try w.writeAll("</code></dd></dl>\n");
+    try w.writeAll("</code></dd><dt>Checkpoint</dt><dd>");
+    if (args.revision.label.len > 0) {
+        try util.escapeHtml(w, args.revision.label);
+    } else {
+        try w.writeAll("<span class=\"muted\">Not a checkpoint</span>");
+    }
+    try w.writeAll("</dd></dl>\n");
+    try w.writeAll("<form class=\"checkpoint-form\" method=\"post\" action=\"/notes/");
+    try w.print("{d}/history/{d}/label\">", .{ args.note.id, args.revision.revision_no });
+    try csrfField(w, ctx.csrf);
+    try w.writeAll("<label for=\"checkpoint-label\">Checkpoint label</label><input id=\"checkpoint-label\" name=\"label\" type=\"text\" maxlength=\"80\" value=\"");
+    try util.escapeHtml(w, args.revision.label);
+    try w.writeAll("\" placeholder=\"e.g. Before restructuring\"><button type=\"submit\" class=\"button secondary\">Save label</button><p class=\"muted small\">Labels annotate this immutable revision and are never part of its content checksum. Leave empty to clear.</p></form>\n");
     try w.writeAll("<h2>");
     try util.escapeHtml(w, displayTitle(args.revision.title));
     try w.writeAll("</h2><pre class=\"revision-source\" aria-label=\"Markdown source of revision ");

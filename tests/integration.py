@@ -433,6 +433,24 @@ def main():
         check("unknown revision download is 404", status == 404, status)
         status, _, _ = c.form(rev_url + "/history/1/download", {}, csrf=csrf_of(rev_history))
         check("revision download rejects POST", status == 405, status)
+        status, headers, _ = c.form(rev_url + "/history/1/label", {"label": "Before restructure"},
+                                    csrf=csrf_of(old_rev))
+        check("checkpoint label saves", status == 303 and headers.get("location") == rev_url + "/history/1",
+              f"{status} {headers}")
+        status, _, labelled_history = c.get(rev_url + "/history")
+        check("history shows the checkpoint label", b"Checkpoint: Before restructure" in labelled_history)
+        status, _, labelled_revision = c.get(rev_url + "/history/1")
+        check("revision detail exposes the checkpoint label",
+              b'value="Before restructure"' in labelled_revision)
+        status, _, _ = c.form(rev_url + "/history/1/label", {"label": "x" * 100},
+                              csrf=csrf_of(old_rev))
+        check("overlong checkpoint label is rejected", status == 400, status)
+        status, _, _ = c.form(rev_url + "/history/1/label", {"label": "x"}, csrf="0" * 64)
+        check("checkpoint label requires CSRF", status == 403, status)
+        status, _, _ = c.form(rev_url + "/history/1/label", {"label": ""}, csrf=csrf_of(old_rev))
+        check("checkpoint label clears", status == 303, status)
+        status, _, cleared_history = c.get(rev_url + "/history")
+        check("cleared checkpoint disappears", b"Checkpoint: Before restructure" not in cleared_history)
         status, _, compared = c.get(rev_url + "/compare?from=1&to=2")
         check("compare renders added and removed lines",
               status == 200 and b"diff-line removed" in compared and b"diff-line added" in compared

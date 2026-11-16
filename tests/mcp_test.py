@@ -117,11 +117,12 @@ def run(work):
 
         tools = client.request("tools/list")["result"]["tools"]
         names = {tool["name"] for tool in tools}
-        check("write mode exposes 21 tools", len(tools) == 21, len(tools))
+        check("write mode exposes 22 tools", len(tools) == 22, len(tools))
         check("all expected tools present", {
             "list_notes", "search_notes", "get_note", "create_note", "update_note",
             "append_note", "attach_file", "delete_attachment", "restore_note",
             "list_revisions", "get_revision", "compare_revisions", "restore_revision",
+            "set_revision_label",
         } <= names)
         check("tool schemas are objects",
               all(isinstance(tool["inputSchema"], dict) for tool in tools))
@@ -187,6 +188,13 @@ def run(work):
         check("get_revision returns exact Markdown",
               first_revision["revision"]["body"] == "# hello\n\nfrom mcp"
               and len(first_revision["revision"]["checksum"]) == 64)
+        labelled = client.call("set_revision_label", {
+            "id": note["id"], "revision": 1, "label": "smoke checkpoint",
+        })["structuredContent"]
+        check("set_revision_label stores the label", labelled["label"] == "smoke checkpoint")
+        labelled_list = client.call("list_revisions", {"id": note["id"]})["structuredContent"]
+        check("list_revisions returns checkpoint labels",
+              any(r["label"] == "smoke checkpoint" for r in labelled_list["revisions"]))
         comparison = client.call("compare_revisions", {
             "id": note["id"], "from": 1, "to": 2,
         })["structuredContent"]
@@ -268,6 +276,7 @@ def run(work):
         check("read-only mode exposes only read tools", len(read_tools) == 11, len(read_tools))
         check("read-only mode hides create_note", "create_note" not in read_names)
         check("read-only mode hides restore_revision", "restore_revision" not in read_names)
+        check("read-only mode hides set_revision_label", "set_revision_label" not in read_names)
         refused = read_client.call("create_note", {"title": "no", "body": "no"})
         check("read-only mode refuses writes",
               refused.get("isError") is True

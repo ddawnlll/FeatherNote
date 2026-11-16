@@ -653,11 +653,15 @@ fn dispatch(
             if (method != .POST) return methodNotAllowed(arena, ctx, "POST");
             return handleBlocksOp(app, request, arena, ctx, id, op, content_type);
         } else if (std.mem.eql(u8, act, "history")) {
-            if (!isReadMethod(method)) return methodNotAllowed(arena, ctx, "GET, HEAD");
             if (sub_action) |rev_text| {
                 const revision_no = std.fmt.parseInt(i64, rev_text, 10) catch return notFound(arena, ctx);
                 if (revision_no < 1) return notFound(arena, ctx);
                 if (final_action) |artifact| {
+                    if (std.mem.eql(u8, artifact, "label")) {
+                        if (method != .POST) return methodNotAllowed(arena, ctx, "POST");
+                        return handleRevisionLabel(app, request, arena, ctx, id, revision_no, content_type);
+                    }
+                    if (!isReadMethod(method)) return methodNotAllowed(arena, ctx, "GET, HEAD");
                     if (std.mem.eql(u8, artifact, "download")) {
                         return handleRevisionDownload(app, arena, ctx, id, revision_no);
                     }
@@ -666,9 +670,11 @@ fn dispatch(
                     }
                     return notFound(arena, ctx);
                 }
+                if (!isReadMethod(method)) return methodNotAllowed(arena, ctx, "GET, HEAD");
                 return handleRevision(app, arena, ctx, id, revision_no);
             }
             if (final_action != null) return notFound(arena, ctx);
+            if (!isReadMethod(method)) return methodNotAllowed(arena, ctx, "GET, HEAD");
             return handleHistory(app, arena, ctx, id, query.page);
         } else if (std.mem.eql(u8, act, "compare")) {
             if (sub_action != null or final_action != null) return notFound(arena, ctx);
@@ -1603,6 +1609,42 @@ fn handleRevisionManifest(app: *App, arena: Allocator, ctx: views.Ctx, id: i64, 
         .body = aw.written(),
         .content_type = "application/json; charset=utf-8",
         .disposition = disposition,
+    };
+}
+
+fn validateLabel(label: []const u8) !void {
+    if (label.len > 80) return error.FieldTooLong;
+    if (!std.unicode.utf8ValidateSlice(label)) return error.InvalidEncoding;
+    for (label) |ch| {
+        if (ch < 0x20 or ch == 0x7f) return error.InvalidEncoding;
+    }
+}
+
+fn handleRevisionLabel(
+    app: *App,
+    request: *http.Server.Request,
+    arena: Allocator,
+    ctx: views.Ctx,
+    id: i64,
+    revision_no: i64,
+    content_type: ?[]const u8,
+) !Response {
+    if (!isFormContentType(content_type)) {
+        return htmlError(arena, ctx, .unsupported_media_type, "Unsupported form", "Submit the HTML checkpoint form.");
+    }
+    const body = readBody(request, arena) catch return bodyErrorResponse(arena, ctx, request, content_type);
+    const form = util.parseForm(arena, body) catch {
+        return htmlError(arena, ctx, .bad_request, "Malformed form", "The checkpoint form could not be parsed.");
+    };
+    if (!csrfOk(ctx.csrf, form)) return csrfFailure(arena, ctx);
+    const label = std.mem.trim(u8, form.get("label") orelse "", " ");
+    validateLabel(label) catch {
+        return htmlError(arena, ctx, .bad_request, "Invalid checkpoint label", "Checkpoint labels are limited to 80 UTF-8 characters and cannot contain control characters.");
+    };
+    if (!try app.database.setRevisionLabel(id, revision_no, label)) return notFound(arena, ctx);
+    return .{
+        .status = .see_other,
+        .location = try std.fmt.allocPrint(arena, "/notes/{d}/history/{d}", .{ id, revision_no }),
     };
 }
 

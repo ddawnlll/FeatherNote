@@ -78,6 +78,7 @@ Read tools are always present. Write tools appear only with `--allow-write`.
 | `delete_note` | yes | Move to Trash, requires `version` |
 | `restore_note` | yes | Restore from Trash, requires the trash `version` |
 | `restore_revision` | yes | Copy an old revision to a new head, requires `version` |
+| `set_revision_label` | yes | Set or clear a checkpoint label on a revision |
 | `attach_file` | yes | Base64 upload up to 8 MiB, appends the Markdown link |
 | `delete_attachment` | yes | Remove an attachment record |
 | `set_theme` | yes | Set a validated theme id |

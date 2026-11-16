@@ -131,6 +131,11 @@ Each revision can be downloaded as the exact original Markdown bytes, with a
 JSON manifest of the title, checksum and attachment SHA-256 values that snapshot
 referenced. Restoring a revision also restores the files it referenced.
 
+Any revision can carry a short human-readable **checkpoint label** such as
+"Before restructuring". Labels annotate the immutable snapshot, are excluded
+from its content checksum, and appear in the timeline. There is no pruning job
+to accidentally remove a labelled revision.
+
 ### Log in
 
 One password, no registration, no account recovery through email. If you lose
@@ -216,7 +221,7 @@ other MCP client can read and write notes. It is read-only unless you opt in:
 feathernote mcp --db data/feathernote.db --allow-write
 ```
 
-It exposes 21 tools, including search, read, create, append, pin, delete,
+It exposes 22 tools, including search, read, create, append, pin, delete,
 restore, revision history and restore, base64 attachments, and theme control, plus
 `feathernote://notes/{id}` resources. Writes require the note version, so a
 stale update returns a conflict with the latest note instead of overwriting it.
@@ -315,8 +320,8 @@ server reads plaintext.
 
 ```sh
 zig build test                 # unit tests: Markdown, diff, revisions, CRUD, search
-python3 tests/integration.py   # 170 real HTTP checks, no JavaScript
-python3 tests/mcp_test.py      # 52 stdio MCP protocol checks
+python3 tests/integration.py   # 177 real HTTP checks, no JavaScript
+python3 tests/mcp_test.py      # 55 stdio MCP protocol checks
 python3 scripts/bench.py --requests 200 --counts 100,10000
 ```
 
