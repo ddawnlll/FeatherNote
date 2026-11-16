@@ -715,6 +715,14 @@ def main():
         check("online backup succeeds and passes integrity_check",
               result.returncode == 0 and "integrity_check = ok" in (result.stdout + result.stderr),
               result.stderr)
+        doctor = subprocess.run([binary, "admin", "doctor", "--db", backup_path],
+                                cwd=ROOT, capture_output=True, text=True)
+        doctor_output = doctor.stdout + doctor.stderr
+        check("doctor passes on the online backup",
+              doctor.returncode == 0
+              and "PASS revision checksums match content" in doctor_output
+              and "PASS current notes match their head revisions" in doctor_output,
+              doctor_output)
         check("concurrent saves all committed during backup",
               len(write_statuses) == 40 and all(s == 303 for s in write_statuses), write_statuses[:5])
 

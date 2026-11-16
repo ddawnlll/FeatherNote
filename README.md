@@ -312,6 +312,17 @@ carries notes, files, and appearance together.
 database, verifies the backup, and swaps it into place with the service
 stopped.
 
+Verify any database or backup read-only before trusting it:
+
+```sh
+feathernote admin doctor --db /var/backups/feathernote/daily/latest.db
+```
+
+The doctor checks SQLite integrity and foreign keys, FTS row parity, revision
+chains and checksums, current-state/head agreement, asset-manifest resolution,
+attachment ownership and label bounds. It exits non-zero on any failure and
+never writes to the database. Both backup and restore scripts run it.
+
 Backups that leave the host should be encrypted with a key you manage
 separately. FeatherNote does not claim end-to-end encryption, because the
 server reads plaintext.
@@ -320,7 +331,7 @@ server reads plaintext.
 
 ```sh
 zig build test                 # unit tests: Markdown, diff, revisions, CRUD, search
-python3 tests/integration.py   # 177 real HTTP checks, no JavaScript
+python3 tests/integration.py   # 178 real HTTP checks, no JavaScript
 python3 tests/mcp_test.py      # 55 stdio MCP protocol checks
 python3 scripts/bench.py --requests 200 --counts 100,10000
 ```
