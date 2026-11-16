@@ -19,7 +19,7 @@ itself; checks below name the test that proves the claim.
 | Three-way conflicts (F10) | 409 page shows the exact base revision, base→latest diff and base→draft diff with the draft preserved; no automatic merge. |
 | Historical export (F11) | Exact Markdown download plus JSON title/checksum/asset manifest per revision; safe attachment filename; GET-only. |
 | Named checkpoints (F06) | 80-character labels on any revision; CSRF web form and MCP `set_revision_label`; labels excluded from checksums and protected by the retention purge. |
-| Read-only doctor and verified backups (F59/F62 partial) | `admin doctor` checks integrity, FKs, FTS parity, revision chains/checksums, head agreement, asset manifests, attachment ownership, labels and retention floors; backup/restore scripts run it. |
+| Verified backups and read-only doctor (F59, F62) | `admin doctor` checks integrity, FKs, FTS parity, revision chains/checksums, head agreement, asset manifests, attachment ownership/size, a recomputed SHA-256 of every blob, labels and retention floors. `admin backup` runs the doctor on the destination and fails on any mismatch; the integration drill copies the backup, starts a server on it and reads the restored notes. |
 | Focus reading and print output (F52, F55) | `GET /notes/{id}/focus` renders semantic prose without site chrome in the same CSP; `@media print` hides controls and prints external link targets; integration checks assert no scripts and the print rules. |
 | Explicit retention and verified purge (F12) | `admin purge-history --keep-last N [--older-than-days D] [--apply]`; dry-run by default; keeps newest N, all labels and young revisions; records per-note floors; verifies labels, heads, chains, assets and integrity before commit; history reports the floor. |
 
@@ -27,7 +27,7 @@ itself; checks below name the test that proves the claim.
 
 - `zig build test`: pass (including revision lifecycle, no-op, conflict,
   restore, attachment manifest, v3→v4 baseline migration, bounded diff).
-- `python3 tests/integration.py`: 194 passed, 0 failed.
+- `python3 tests/integration.py`: 195 passed, 0 failed.
 - `python3 tests/mcp_test.py`: 55 passed, 0 failed.
 - Retention: dry run reports the plan without committing; apply matches the
   plan; labelled checkpoint blocks a later `--keep-last 1`; doctor passes with

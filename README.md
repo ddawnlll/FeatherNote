@@ -316,9 +316,12 @@ feathernote admin backup --db /var/lib/feathernote/feathernote.db \
   --out /var/backups/feathernote/daily/pre-update.db
 ```
 
-The command runs `PRAGMA integrity_check` on the destination before reporting
-success. Because attachments and the selected theme live in SQLite, a backup
-carries notes, files, and appearance together.
+The command runs `PRAGMA integrity_check` and then the full read-only doctor on
+the destination before reporting success, including revision checksums and a
+SHA-256 recomputation of every attachment blob. A backup that fails any check
+returns non-zero and is reported as unsafe to rely on. Because attachments and
+the selected theme live in SQLite, a backup carries notes, files, and
+appearance together.
 [`scripts/backup.sh`](scripts/backup.sh) adds 7 daily and 4 weekly retention.
 [`scripts/restore.sh`](scripts/restore.sh) refuses to overwrite an existing
 database, verifies the backup, and swaps it into place with the service
@@ -332,7 +335,8 @@ feathernote admin doctor --db /var/backups/feathernote/daily/latest.db
 
 The doctor checks SQLite integrity and foreign keys, FTS row parity, revision
 chains and checksums, current-state/head agreement, asset-manifest resolution,
-attachment ownership and label bounds. It exits non-zero on any failure and
+attachment ownership and sizes, a recomputed SHA-256 for every attachment
+blob, label bounds and retention floors. It exits non-zero on any failure and
 never writes to the database. Both backup and restore scripts run it.
 
 ### Explicit history retention
@@ -364,7 +368,7 @@ server reads plaintext.
 
 ```sh
 zig build test                 # unit tests: Markdown, diff, revisions, CRUD, search
-python3 tests/integration.py   # 194 real HTTP checks, no JavaScript
+python3 tests/integration.py   # 195 real HTTP checks, no JavaScript
 python3 tests/mcp_test.py      # 55 stdio MCP protocol checks
 python3 scripts/bench.py --requests 200 --counts 100,10000
 ```
